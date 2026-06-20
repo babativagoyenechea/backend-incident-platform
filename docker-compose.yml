@@ -26,24 +26,30 @@ services:
     image: redis:7-alpine
     ports:
       - "6379:6379"
-      
+
   api:
-    build: ./backend
+    build: .
     ports: ["3000:3000"]
-    env_file: .env.development
+    env_file: ./.env.development
+    environment:
+      # Sobrescribimos el host del .env para que la red de Docker se entienda entre contenedores
+      POSTGRES_HOST: postgres
+      MONGO_URI: mongodb://mongo:27017/events_db
+      REDIS_HOST: redis
     depends_on:
       postgres: { condition: service_healthy }
       mongo: { condition: service_started }
       redis: { condition: service_started }
 
   frontend:
-    build: ./frontend
+    build: ../frontend-incident-platform
     ports: ["5173:5173"]
     environment:
       VITE_API_URL: http://localhost:3000
       VITE_WS_URL: ws://localhost:3000
     depends_on: [api]
 
+  # ── Sistema legacy en PHP (HU5) ──────────────────────────────────
   php-legacy:
     image: php:8.2-cli
     volumes:
@@ -51,7 +57,7 @@ services:
     working_dir: /app
     environment:
       API_BASE_URL: http://api:3000
-      LEGACY_API_KEY: dev-key
+      LEGACY_API_KEY: legacy-php-dev-key-2026
     command: php legacy-client.php
     depends_on: [api]
 
