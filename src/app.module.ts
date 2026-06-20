@@ -3,7 +3,8 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { MongooseModule } from '@nestjs/mongoose';
 import { BullModule } from '@nestjs/bullmq';
-import { ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler'; 
+import { APP_GUARD } from '@nestjs/core'; 
 import * as Joi from 'joi';
 
 import { RedisModule } from './modules/shared/infrastructure/redis/redis.module';
@@ -65,6 +66,7 @@ import { HealthModule } from './modules/health/health.module';
           host: config.get<string>('REDIS_HOST'),
           port: config.get<number>('REDIS_PORT'),
           db: config.get<number>('REDIS_QUEUE_DB'),
+          maxRetriesPerRequest: null,
         },
       }),
       inject: [ConfigService],
@@ -83,6 +85,12 @@ import { HealthModule } from './modules/health/health.module';
     DashboardModule,
     IncidentsModule,
     HealthModule,
+  ],
+  providers: [
+    {
+      provide: APP_GUARD, 
+      useClass: ThrottlerGuard,
+    },
   ],
 })
 export class AppModule {}
