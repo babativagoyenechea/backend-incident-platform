@@ -1,0 +1,33 @@
+# Dependencias instaladas
+node_modules/
+/jspm_packages
+
+# Compilaciones y carpetas de distribucion
+/dist
+/out
+/build
+.gradle
+/lib
+
+# Variables de entorno y credenciales locales
+.env
+.env.development
+.env.test
+.env.production
+.env.local
+
+# Logs del sistema y runtime
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+*.log
+
+# Configuraciones de editores de codigo (IDE)
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
