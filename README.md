@@ -1,515 +1,1291 @@
-# Plataforma de Gestión de Incidentes y Monitoreo Operacional — Backend
+# 🚨 Plataforma de Gestión de Incidentes y Monitoreo Operacional
 
-API REST + WebSockets construida en NestJS para centralizar eventos operacionales, gestionar el ciclo de vida de incidentes y exponer métricas en tiempo real para el equipo de operaciones.
+**Backend — NestJS + TypeScript | PostgreSQL + MongoDB + Redis + BullMQ**
 
-Este documento explica cómo levantar el proyecto y, sobre todo, **por qué está construido como está**. No es un README genérico de NestJS: cada decisión técnica responde a un problema concreto del reto (HU1 a HU5) y aquí dejo el razonamiento detrás de cada una, para que cualquiera que revise el repo (o yo mismo en 3 meses) entienda el "por qué" sin tener que adivinarlo leyendo el código.
-
----
-
-## Índice
-
-1. [Stack y por qué cada pieza está ahí](#1-stack-y-por-qué-cada-pieza-está-ahí)
-2. [Arquitectura general](#2-arquitectura-general)
-3. [Decisiones de base de datos](#3-decisiones-de-base-de-datos)
-4. [Cómo funciona el caché (Redis)](#4-cómo-funciona-el-caché-redis)
-5. [Cómo funcionan los WebSockets](#5-cómo-funcionan-los-websockets)
-6. [Procesamiento asíncrono de alertas](#6-procesamiento-asíncrono-de-alertas)
-7. [Integración con el sistema legacy (HU5)](#7-integración-con-el-sistema-legacy-hu5)
-8. [Seguridad](#8-seguridad)
-9. [Instalación y ejecución](#9-instalación-y-ejecución)
-10. [Variables de entorno](#10-variables-de-entorno)
-11. [Pruebas](#11-pruebas)
-12. [Documentación de la API](#12-documentación-de-la-api)
-13. [Decisiones que quedaron pendientes / fuera de alcance](#13-decisiones-que-quedaron-pendientes--fuera-de-alcance)
+> Reto Técnico — Coordinadora  
+> Versión de guía técnica: v5.0 (Definitiva)
 
 ---
 
-## 1. Stack y por qué cada pieza está ahí
+## 📋 Tabla de Contenidos
 
-| Pieza | Para qué la uso | Por qué esa y no otra |
-|---|---|---|
-| **NestJS + TypeScript** | Framework del backend | Da estructura modular de fábrica (módulos, providers, guards, interceptors), que encaja directo con DDD sin tener que inventar convenciones propias. |
-| **PostgreSQL** | Incidentes y su auditoría | Necesito transacciones ACID reales y un ciclo de vida con estados controlados. Esto lo explico a fondo en la sección 3. |
-| **MongoDB** | Eventos y alertas | Volumen alto de escritura, forma variable (cada app manda un `metadata` distinto), sin necesidad de migraciones cada vez que aparece un campo nuevo. |
-| **Redis** | Caché de métricas + cola de trabajos (BullMQ) | Un solo motor cubriendo dos responsabilidades distintas pero separadas lógicamente por número de base. |
-| **BullMQ** | Procesar alertas en segundo plano | Para que registrar un evento crítico no le cueste tiempo de respuesta al cliente que lo envía. |
-| **Socket.IO** | Tiempo real hacia el dashboard | El operador necesita ver alertas e incidentes sin refrescar la página. |
-| **Swagger/OpenAPI** | Documentación de contratos | Requisito explícito del reto y, en la práctica, la forma más rápida de que alguien pruebe la API sin tener que leerse el código. |
-
-La regla que usé para decidir cada tecnología fue siempre la misma: **mirar la naturaleza del dato, no mi preferencia personal**. Si me preguntan en la sustentación "¿por qué no metiste todo en una sola base de datos?", la respuesta corta es esa.
-
----
-
-## 2. Arquitectura general
-
-El sistema sigue **Domain-Driven Design** con 4 capas por módulo (`events`, `incidents`, `alerts`, `dashboard`). La regla de oro: la lógica de negocio vive en `domain/` y no sabe nada de NestJS, de Postgres ni de Mongo. Si mañana cambio TypeORM por Prisma, lo único que toco es `infrastructure/`.
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                         PRESENTATION                              │
-│   Controllers HTTP · WebSocket Gateway · Guards · DTOs validados  │
-└───────────────────────────┬────────────────────────────────────┬─┘
-                             │                                    │
-┌────────────────────────────▼──────────────┐   ┌─────────────────▼─────────────┐
-│              APPLICATION                    │   │      (entrada externa)        │
-│   Use Cases · orquestación de flujo         │   │   BullMQ Worker (alertas)     │
-│   No conoce SQL, no conoce HTTP             │◄──┤   actúa como un "controller"  │
-└────────────────────────────┬───────────────┘   │   pero para colas, no HTTP     │
-                             │                    └────────────────────────────────┘
-┌────────────────────────────▼──────────────┐
-│                  DOMAIN                     │
-│  Entidades puras · Value Objects            │
-│  Interfaces de repositorio (contratos)      │
-│  Reglas de negocio (ej: transiciones de     │
-│  estado de un incidente)                    │
-└────────────────────────────┬───────────────┘
-                             │ implementa
-┌────────────────────────────▼──────────────┐
-│              INFRASTRUCTURE                 │
-│  TypeORM (Postgres) · Mongoose (Mongo)      │
-│  Cliente Redis · Config de BullMQ           │
-└──────────────────────────────────────────────┘
-```
-
-Un ejemplo concreto de por qué esto importa: la regla "un incidente `RESOLVED` no puede volver a `IN_PROGRESS` directamente" vive en un Value Object (`IncidentStatus`) dentro de `domain/`. No está en el controller, no está en el repositorio. Eso significa que puedo testear esa regla sin levantar NestJS, sin mockear una base de datos, sin hacer un solo request HTTP — es una clase de TypeScript pura con un método.
-
-El worker de BullMQ (`AlertWorker`) vive en `infrastructure/queue/`, no en `application/`, aunque al principio uno podría pensar que "procesar una alerta" es lógica de aplicación. La razón: un `@Processor` de BullMQ es un punto de entrada impulsado por un framework externo, conceptualmente es lo mismo que un controlador HTTP — solo que en lugar de escuchar peticiones HTTP escucha jobs de una cola. Por eso vive en infraestructura y delega el trabajo real a `CreateAlertUseCase`, que sí es un caso de uso puro.
-
-### Flujo completo de un evento crítico
-
-```
-Sistema externo
-      │
-      │ POST /api/events  { severity: "CRITICAL", ... }
-      ▼
-ThrottlerGuard ──► 429 si se excede el límite de ráfaga
-      │
-TraceIdInterceptor ──► genera/reutiliza un x-trace-id
-      │
-ValidationPipe ──► 400 si el payload no cumple el DTO
-      │
-RegisterEventUseCase
-      │
-      ├─► Mongo: guarda el evento, retorna el _id real
-      │
-      ├─► severity === CRITICAL?
-      │        └─► encola job "process-alert" en BullMQ con el eventId real
-      │
-      └─► responde 201 { traceId }  ← inmediato, no espera a que se procese la alerta
-                  │
-                  │  (en paralelo, en segundo plano)
-                  ▼
-        AlertWorker.process(job)
-                  │
-                  ├─► CreateAlertUseCase ──► Mongo: guarda la alerta
-                  ├─► gateway.emitAlertCreated(alert)        → llega al navegador por WebSocket
-                  └─► metricsBroadcast.invalidateAndBroadcast()
-                              ├─ borra el caché de métricas
-                              ├─ recalcula
-                              └─ gateway.emitMetricsUpdated(metrics)  → dashboard se actualiza solo
-```
-
-Lo importante de este flujo: **el cliente que manda el evento nunca espera a que la alerta termine de procesarse**. Recibe su `201` apenas el evento queda guardado en Mongo. Todo lo demás pasa desacoplado, con reintentos automáticos si algo falla.
+1. [Arquitectura del Sistema](#2-arquitectura-del-sistema)
+2. [Justificación del Stack Tecnológico](#3-justificación-del-stack-tecnológico)
+3. [Persistencia y Flujo de Datos](#4-persistencia-y-flujo-de-datos)
+4. [Requisitos Previos](#5-requisitos-previos)
+5. [Variables de Entorno](#6-variables-de-entorno)
+6. [Guía de Instalación Detallada (Getting Started)](#7-guía-de-instalación-detallada-getting-started)
+7. [Verificación por Base de Datos con Comandos Docker](#8-verificación-por-base-de-datos-con-comandos-docker)
+8. [Pruebas por Historia de Usuario (HU) — Paso a Paso](#9-pruebas-por-historia-de-usuario-hu---paso-a-paso)
+9. [Pruebas Unitarias y de Integración](#10-pruebas-unitarias-y-de-integración)
+10. [Estrategia de Escalamiento en Producción](#11-estrategia-de-escalamiento-en-producción)
+11. [Trade-offs y Decisiones Pendientes (Honestidad Técnica)](#12-trade-offs-y-decisiones-pendientes)
 
 ---
 
-## 3. Decisiones de base de datos
+## 1. Arquitectura del Sistema
 
-### ¿Por qué PostgreSQL para incidentes y no todo en Mongo?
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        PLATAFORMA                                   │
+│                                                                     │
+│  ┌──────────┐    ┌─────────────────┐    ┌──────────────────────┐   │
+│  │  React   │◄──►│   NestJS API    │◄──►│   PostgreSQL DB       │   │
+│  │Dashboard │    │   (port 3000)   │    │   incidents           │   │
+│  │(port 5173│    │                 │    │   incident_audit      │   │
+│  └──────────┘    └────────┬────────┘    └──────────────────────┘   │
+│       ▲                   │                                         │
+│       │ WebSocket         │             ┌──────────────────────┐   │
+│       │ (socket.io)       │             │    MongoDB            │   │
+│  ┌────┴─────┐             │             │    events             │   │
+│  │PHP Legacy│─────────────┤             │    alerts             │   │
+│  │(x-api-key│             │             └──────────────────────┘   │
+│  └──────────┘             │                                         │
+│                           │             ┌──────────────────────┐   │
+│  Sistemas externos        │             │  Redis DB0 — Cache    │   │
+│  POST /api/events ───────►│             │  Redis DB1 — BullMQ   │   │
+│  (Rate Limited 100/min)   └────────────►└──────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
-Los incidentes tienen tres características que piden a gritos una base relacional:
+### Estructura de carpetas DDD (4 capas por módulo)
 
-1. **Tienen un ciclo de vida con estados controlados.** `OPEN → IN_PROGRESS → RESOLVED`, y no todas las transiciones son válidas (no puedes pasar de `RESOLVED` a `IN_PROGRESS` directamente). Esa regla la refuerzo en dos capas: en el dominio (Value Object) y en el motor de base de datos (tipo `ENUM` en Postgres), así que ni siquiera alguien escribiendo directo a la base sin pasar por la API puede meter un estado inválido.
-2. **Tienen una relación 1:N con su auditoría.** Cada cambio de estado genera un registro en `incident_audit`. Eso es exactamente el caso de uso para el que existen las foreign keys.
-3. **Necesitan consistencia inmediata.** Cuando un operador cambia el estado de un incidente, ese cambio y su registro de auditoría tienen que guardarse juntos — o se guardan los dos, o no se guarda ninguno. Eso es una garantía ACID, nativa en Postgres.
+```
+src/
+├── main.ts                          # Bootstrap + Swagger + Seguridad global
+├── app.module.ts                    # Módulo raíz: TypeORM, Mongoose, BullMQ, Throttler
+│
+└── modules/
+    ├── events/                      # HU1: Registro de Eventos
+    │   ├── domain/                  # Entidades puras + interfaces de repositorio
+    │   │   ├── entities/event.entity.ts
+    │   │   └── repositories/i-event.repository.ts
+    │   ├── application/             # Casos de uso + DTOs
+    │   │   ├── use-cases/register-event.use-case.ts
+    │   │   └── dtos/register-event.dto.ts
+    │   ├── infrastructure/          # Adaptadores de persistencia
+    │   │   └── persistence/mongo-event.repository.ts
+    │   └── presentation/            # Controladores HTTP
+    │       └── controllers/event.controller.ts
+    │
+    ├── incidents/                   # HU2: Gestión de Incidentes
+    │   ├── domain/
+    │   │   ├── entities/{incident.entity.ts, incident-audit.entity.ts}
+    │   │   ├── value-objects/incident-status.vo.ts  ← regla de negocio pura
+    │   │   └── repositories/i-incident.repository.ts
+    │   ├── application/
+    │   │   ├── use-cases/{create-incident, update-incident-status}.use-case.ts
+    │   │   └── dtos/{create-incident, update-status, incident-filters}.dto.ts
+    │   ├── infrastructure/
+    │   │   └── persistence/
+    │   │       ├── entities/{incident, incident-audit}.orm-entity.ts
+    │   │       └── typeorm-incident.repository.ts  ← QueryRunner transaccional
+    │   └── presentation/
+    │       └── controllers/incident.controller.ts
+    │
+    ├── alerts/                      # HU3: Procesamiento Asíncrono
+    │   ├── domain/entities/alert.entity.ts
+    │   ├── application/use-cases/create-alert.use-case.ts
+    │   └── infrastructure/
+    │       ├── persistence/mongo-alert.repository.ts
+    │       └── queue/
+    │           ├── bullmq.config.ts  ← nombres de colas + opciones
+    │           └── alert.worker.ts   ← @Processor en infrastructure/ (correcto)
+    │
+    ├── dashboard/                   # HU4: Métricas en Tiempo Real
+    │   ├── application/use-cases/get-dashboard-metrics.use-case.ts
+    │   └── presentation/controllers/dashboard.controller.ts
+    │
+    ├── websockets/
+    │   └── events.gateway.ts        ← 3 emisores: alert.created, incident.updated, metrics.updated
+    │
+    ├── health/health.controller.ts  ← Terminus: Postgres + MongoDB + Redis ping
+    │
+    └── shared/
+        ├── application/services/metrics-broadcast.service.ts  ← invalida + recalcula + emite
+        ├── auth.module.ts           ← JWT + ApiKey guards
+        ├── filters/global-exception.filter.ts
+        ├── guards/{jwt-auth, api-key}.guard.ts
+        ├── interceptors/trace-id.interceptor.ts
+        └── infrastructure/redis/redis.module.ts  ← único cliente REDIS_CACHE
+```
 
+---
+
+## 3. Justificación del Stack Tecnológico
+
+### Por qué NestJS y no Express o Fastify
+
+NestJS es el framework Node.js que más naturalmente implementa los principios SOLID y DDD, porque su sistema de módulos, decoradores e inyección de dependencias forza una separación de capas. En Express, esa separación es opcional y queda al criterio del desarrollador. El reto pide DDD explícitamente, y NestJS es la herramienta que hace más visible esa intención en el código.
+
+**Fastify** habría sido una alternativa válida (levemente más rápido en benchmarks de raw HTTP), pero NestJS tiene integración nativa con TypeORM, Mongoose, BullMQ, Swagger y WebSockets a través de paquetes `@nestjs/*`, lo cual reduce el tiempo de configuración y el código de pegamento considerablemente en un proyecto de 4 días.
+
+### Por qué TypeScript
+
+El reto lo exige explícitamente. Más allá de eso: los DTOs con `class-validator`, las interfaces de repositorio del dominio, y los tipos de las entidades forman un contrato estático que el compilador verifica en tiempo de build. Errores como pasar un string donde se espera un UUID o llamar a un método que no existe en la interfaz del repositorio se detectan antes de ejecutar, no en runtime.
+
+### Por qué tres bases de datos diferentes
+
+La decisión de fondo que guía todo el proyecto: **cada tecnología se eligió por la naturaleza del dato que maneja, no por preferencia personal ni por uniformidad del stack**.
+
+```
+Dato                   Naturaleza                         Tecnología elegida
+─────────────────────  ─────────────────────────────────  ──────────────────
+Incidentes + Auditoría Ciclo de vida con estados,         PostgreSQL
+                       relaciones FK, atomicidad ACID,
+                       consistencia inmediata
+
+Eventos + Alertas      Append-only, alto volumen,         MongoDB
+                       forma variable (metadata),
+                       sin migraciones ante campos nuevos
+
+Métricas del Dashboard Efímero, TTL 30s, recalculable     Redis DB0 (caché)
+
+Jobs de alerta         Coordinación asíncrona,            Redis DB1 (BullMQ)
+                       reintentos, DLQ
+```
+
+---
+
+## 4. Persistencia y Flujo de Datos
+
+### 4.1 PostgreSQL — Datos Transaccionales
+
+**Qué guarda:** incidentes y su tabla de auditoría de cambios de estado.
+
+**Por qué aquí y no en Mongo:**
+- Los incidentes tienen un ciclo de vida controlado con estados válidos (`OPEN → IN_PROGRESS → RESOLVED`). Los ENUMs de Postgres refuerzan esta restricción incluso a nivel de motor de base de datos, no solo en la aplicación.
+- La relación `incidents → incident_audit` es 1:N y requiere integridad referencial (FK). Si un incidente se borra, no debería quedar auditoría huérfana.
+- El cambio de estado y su registro de auditoría deben ser atómicos: o se guardan los dos, o no se guarda ninguno. `QueryRunner` con `startTransaction/commit/rollback` implementa esta garantía.
+
+**Esquema:**
 ```sql
+-- ENUMs validan en el motor, no solo en la aplicación
 CREATE TYPE incident_status AS ENUM ('OPEN', 'IN_PROGRESS', 'RESOLVED');
 CREATE TYPE severity_level  AS ENUM ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL');
 
+-- TEXT[] nativo (no CSV serializado) — permite operadores @> y && de Postgres
 CREATE TABLE incidents (
   id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   title                   VARCHAR(255) NOT NULL,
+  description             TEXT,
   affected_app            VARCHAR(100) NOT NULL,
   severity                severity_level NOT NULL,
   status                  incident_status NOT NULL DEFAULT 'OPEN',
-  related_event_trace_ids TEXT[],          -- array nativo, no string serializado
+  assignee                VARCHAR(150),
+  related_event_trace_ids TEXT[],
   created_at              TIMESTAMP DEFAULT NOW(),
   updated_at              TIMESTAMP DEFAULT NOW()
 );
 
-CREATE TABLE incident_audit (               -- append-only, nunca se actualiza ni se borra
+-- Auditoría append-only — nunca se actualiza ni se borra
+CREATE TABLE incident_audit (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   incident_id  UUID NOT NULL REFERENCES incidents(id),
   old_status   incident_status NOT NULL,
   new_status   incident_status NOT NULL,
+  changed_by   VARCHAR(150),
+  trace_id     VARCHAR(36),
   changed_at   TIMESTAMP DEFAULT NOW()
 );
 ```
 
-Una nota técnica que vale la pena dejar explícita: `relatedEventTraceIds` es un array **nativo** de Postgres (`TEXT[]`), no la serialización en string que hace TypeORM con `simple-array`. La diferencia importa porque con un array nativo puedo usar operadores reales de Postgres como `@>` o `&&` en queries futuras, algo que con un string separado por comas no se puede hacer sin parsear.
+### 4.2 MongoDB — Datos de Alto Volumen y Forma Variable
 
-El guardado del incidente y su auditoría va envuelto en una transacción real con `QueryRunner` (no dos llamadas sueltas a dos repositorios): si el segundo `save()` falla, se hace rollback del primero también. No queda nunca un incidente con estado cambiado pero sin rastro de auditoría.
+**Qué guarda:** eventos operacionales (HU1) y alertas generadas (HU3).
 
-### ¿Por qué MongoDB para eventos?
+**Por qué aquí y no en Postgres:**
+- Los eventos son append-only (se crean, no se actualizan ni se borran en este alcance). MongoDB es excelente para cargas de escritura masiva sin bloqueos de fila.
+- El campo `metadata` necesita aceptar estructuras distintas según la aplicación origen. En Postgres, agregar un campo nuevo al metadata de eventos requeriría una migración; en Mongo, es un campo `Object` que acepta lo que llegue.
+- Los índices compuestos sobre `{application, severity, occurredAt}` permiten las agregaciones del dashboard sin un JOIN costoso.
 
-Los eventos son justo lo opuesto a un incidente:
+**Colecciones:**
+- `events`: `{traceId (unique), application, eventType, description, severity, occurredAt, metadata}`
+- `alerts`: `{sourceTraceId, affectedApplication, severity, generatedAt, processingStatus}`
 
-- **Append-only**: se crean y ya, no se actualizan ni se borran en este alcance.
-- **De forma variable**: el campo `metadata` necesita aceptar estructuras distintas según qué aplicación esté mandando el evento, sin que eso implique una migración de esquema cada vez que un sistema nuevo se conecta.
-- **Alto volumen de escritura**: si todas las apps de la organización mandan eventos todo el tiempo, esa escritura necesita ser barata y no competir por locks con las transacciones de incidentes.
+### 4.3 Redis DB0 — Cache Aside Pattern
 
-Mongo encaja mejor ahí porque el modelo de documento no obliga a una migración por cada campo nuevo, y los índices compuestos (`application + severity + occurredAt`) sostienen el rendimiento de lectura del dashboard sin penalizar tanto la escritura masiva como lo haría un índice secundario equivalente en una tabla relacional.
+**Qué guarda:** las métricas calculadas del dashboard, serializado como JSON.
 
----
-
-## 4. Cómo funciona el caché (Redis)
-
-Uso **Cache-Aside Pattern** sobre el endpoint de métricas (`GET /api/dashboard/metrics`), que es el que más se consulta y el más costoso de calcular (agrega datos de Postgres, Mongo y alertas en una sola respuesta).
-
+**Flujo:**
 ```
-                  GET /api/dashboard/metrics
-                            │
-                            ▼
-              ¿Existe "dashboard:metrics" en Redis?
-                            │
-              ┌─────────────┴─────────────┐
-            SÍ (HIT)                    NO (MISS)
-              │                            │
-     Devuelve el JSON           Consulta en paralelo:
-     cacheado de inmediato      ├─ Postgres: incidentes OPEN
-     (mismo cachedAt)           ├─ Postgres: incidentes RESOLVED
-              │                 ├─ Mongo: eventos agrupados por app
-              │                 ├─ Mongo: eventos agrupados por severidad
-              │                 └─ Mongo: últimas 10 alertas
-              │                            │
-              │                 Arma el JSON de métricas
-              │                            │
-              │                 Lo guarda en Redis con TTL = 30s
-              │                            │
-              └─────────────┬──────────────┘
-                            ▼
-                   Responde al cliente
+GET /api/dashboard/metrics
+         │
+         ▼
+redis.get('dashboard:metrics')
+         │
+    ┌────┴──────────────────┐
+   HIT                    MISS
+    │                       │
+JSON.parse(cached)    Promise.all([...4 queries...])
+retorna inmediato            │
+                              ▼
+                    redis.set('dashboard:metrics', JSON.stringify(metrics), 'EX', 30)
+                              │
+                              ▼
+                    retorna metrics (incluye cachedAt)
 ```
 
-¿Por qué 30 segundos de TTL? Es un balance: lo suficientemente corto para que el dashboard no muestre datos viejos por mucho tiempo si algo falla en la invalidación activa, y lo suficientemente largo para absorber ráfagas de requests sin pegarle a las 3 bases de datos en cada refresh.
-
-Pero el TTL solo no alcanza para un dashboard que se vende como "tiempo real" — si alguien cambia el estado de un incidente, no quiero que el operador vea el número viejo durante 30 segundos. Por eso, además del TTL, hay **invalidación activa** en los tres momentos exactos donde las métricas cambian:
-
+**Invalidación activa en 3 puntos:**
 1. Se crea un incidente nuevo.
-2. Cambia el estado de un incidente.
-3. El worker de alertas termina de crear una alerta nueva.
+2. Se cambia el estado de un incidente.
+3. El `AlertWorker` crea una alerta nueva.
 
-En cualquiera de esos tres puntos se llama a un servicio compartido (`MetricsBroadcastService`) que hace tres cosas en orden: borra la clave del caché, recalcula las métricas frescas, y las empuja por WebSocket. Centralicé esto en un solo servicio en vez de repetir `redis.del(...)` suelto en tres lugares distintos, porque si mañana cambia la lógica de invalidación, la cambio en un solo punto.
+En los tres puntos, `MetricsBroadcastService.invalidateAndBroadcast()` hace `redis.del('dashboard:metrics')`, recalcula las métricas frescas, y las emite por WebSocket con `gateway.emitMetricsUpdated(freshMetrics)`.
 
-```typescript
-async invalidateAndBroadcast(): Promise<void> {
-  await this.redis.del('dashboard:metrics');
-  const freshMetrics = await this.getMetrics.execute(); // MISS limpio, recalcula
-  this.gateway.emitMetricsUpdated(freshMetrics);          // empuja por socket
-}
+**Por qué TTL de 30 segundos además de la invalidación activa:** si por alguna razón el broadcast falla (el WebSocket no llega, el worker tiene un error inesperado), el caché expira solo en 30 segundos. Es una capa de seguridad que previene que el dashboard muestre datos eternamente desactualizados.
+
+### 4.4 Redis DB1 — BullMQ (Cola de Trabajo)
+
+**Qué guarda:** jobs de procesamiento de alertas pendientes, en proceso, fallidos.
+
+**Flujo asíncrono end-to-end:**
+```
+POST /api/events (severity: CRITICAL)
+         │
+         ▼ ThrottlerGuard → TraceId → ValidationPipe
+         │
+RegisterEventUseCase.execute()
+         │
+         ├─► mongoEventRepo.save() → retorna Event con id real de MongoDB
+         │
+         ├─► alertQueue.add('process-alert', { eventId, traceId, severity, application })
+         │   [opciones: 3 reintentos, backoff exponencial 1s/2s/4s]
+         │
+         └─► return 201 { traceId }   ← respuesta inmediata al cliente
+
+                    ↓ (segundo plano, independiente del HTTP)
+
+AlertWorker.process(job)
+         │
+CreateAlertUseCase.execute()
+         │
+         ├─► mongoAlertRepo.save({ processingStatus: 'PROCESSED' })
+         ├─► gateway.emitAlertCreated(alert)
+         ├─► metricsBroadcast.invalidateAndBroadcast()
+         │       ├─ redis.del('dashboard:metrics')
+         │       ├─ recalcula 4 queries en parallel
+         │       └─ gateway.emitMetricsUpdated(freshMetrics)
+         └─► logger: ALERT_PROCESSING_COMPLETED
+
+Si falla 3 veces:
+         └─► dlq.add('failed-alert', job.data)
+             logger: ALERT_PROCESSING_FAILED
 ```
 
-### Por qué Redis tiene dos roles separados
-
-Redis no es solo caché en este proyecto — también es el broker de la cola de BullMQ. En vez de levantar dos instancias separadas (que en producción sí haría), uso una sola instancia física dividida lógicamente por número de base de datos:
-
-- **DB 0** → caché de métricas (lo de arriba).
-- **DB 1** → cola de BullMQ (procesamiento de alertas, sección 6).
-
-Documentar esta separación importa aunque convivan en la misma instancia: es la forma correcta de razonar sobre responsabilidades distintas, y si el proyecto creciera, separar a instancias físicas (o a Redis Cluster) sería un cambio de configuración, no de arquitectura.
+**Por qué la respuesta HTTP es inmediata:** el endpoint `POST /api/events` no espera a que la alerta se procese. Esto es procesamiento desacoplado. El cliente recibe `201 { traceId }` en milisegundos, y el procesamiento de la alerta ocurre en background. Si el sistema de alertas tiene un pico de carga o falla temporalmente, los eventos siguen ingresando sin afectar la tasa de ingesta.
 
 ---
 
-## 5. Cómo funcionan los WebSockets
+## 5. Requisitos Previos
 
-El dashboard necesita reflejar tres cosas sin que el operador tenga que refrescar la página: alertas nuevas, cambios de estado de incidentes, y métricas actualizadas. Para eso hay un único `EventsGateway` (Socket.IO) que emite tres eventos distintos según qué pasó:
+### Software necesario (instalación desde cero)
 
-```
-                         EventsGateway (Socket.IO)
-                                   │
-        ┌──────────────────────────┼──────────────────────────┐
-        │                          │                           │
-  alert.created            incident.updated            metrics.updated
-        │                          │                           │
-  Se emite cuando          Se emite cuando             Se emite cuando se
-  el AlertWorker           UpdateIncidentStatus         invalida el caché
-  termina de procesar      UseCase confirma una         de métricas (los 3
-  una alerta                transición válida           puntos de la sección 4)
-        │                          │                           │
-        └──────────────────────────┴──────────────────────────┘
-                                   │
-                                   ▼
-                    Cliente React conectado (useLiveMetrics)
-                    actualiza el estado local sin hacer
-                    un nuevo GET — el backend ya le mandó
-                    el dato fresco
-```
-
-La secuencia real, paso a paso, cuando llega un evento crítico:
-
-```
-1. Frontend conectado al socket, escuchando los 3 eventos.
-
-2. POST /api/events (severity: CRITICAL) llega al backend.
-   → responde 201 de inmediato al sistema que mandó el evento.
-   → en paralelo, encola el job de alerta.
-
-3. AlertWorker procesa el job:
-   a) guarda la alerta en Mongo
-   b) gateway.emitAlertCreated(alert)
-        └─► el navegador recibe 'alert.created' y agrega
-            la alerta a la tabla SIN hacer ningún fetch
-   c) metricsBroadcast.invalidateAndBroadcast()
-        └─► el navegador recibe 'metrics.updated' y
-            reemplaza los contadores del dashboard
-            con los valores ya calculados por el backend
-```
-
-El detalle que vale la pena explicar: el frontend **no recalcula nada localmente**. No suma "+1 incidente abierto" en el cliente. El backend manda el bloque completo de métricas ya calculado, y el frontend simplemente lo reemplaza. Esto evita que el dashboard se desincronice si dos operadores están conectados a la vez y cada uno ve eventos en distinto orden — siempre terminan viendo el mismo número, porque el número siempre viene calculado del mismo lugar.
-
-`useLiveMetrics` en el frontend sigue el patrón **REST primero, WebSocket después**: al montar el dashboard, hace un `GET /api/dashboard/metrics` normal para tener algo que mostrar de inmediato, y recién después abre la conexión de socket para recibir las actualizaciones incrementales. Si abriera el socket primero y dependiera solo de eso, el dashboard quedaría en blanco hasta que ocurriera el primer evento.
-
----
-
-## 6. Procesamiento asíncrono de alertas
-
-Cuando un evento llega marcado como `CRITICAL`, no genero la alerta de forma síncrona dentro del mismo request — la encolo en BullMQ (sobre Redis DB1) y la proceso en segundo plano. La razón es simple: si la generación de la alerta tardara o fallara, no quiero que eso le cueste tiempo de respuesta (ni un error 500) al sistema externo que solo está reportando un evento.
-
-```
-alertQueue.add('process-alert', payload, {
-  attempts: 3,
-  backoff: { type: 'exponential', delay: 1000 },  // 1s, 2s, 4s
-})
-```
-
-Si el job falla las 3 veces, no se pierde silenciosamente: se manda a una **Dead Letter Queue** (`alert-processing-failed`) para poder revisarlo después sin tener que ir a buscar en logs qué pasó. Cada paso del procesamiento queda registrado con el mismo `traceId` que llegó en el evento original, así que si alguien reporta un problema, con ese `traceId` puedo reconstruir todo el recorrido: evento → cola → alerta → WebSocket → dashboard.
-
----
-
-## 7. Integración con el sistema legacy (HU5)
-
-### El problema que resuelve esta sección
-
-La organización tiene un sistema heredado en PHP que necesita poder ver qué incidentes están abiertos. La forma fácil (y mala) de resolver esto sería darle a ese sistema legacy acceso directo a la base de datos de Postgres. La decisión que tomé fue la contraria: **el sistema legacy es un cliente más de la API REST**, exactamente igual que el dashboard de React, solo que con su propio mecanismo de autenticación.
-
-```
-┌─────────────────┐                       ┌──────────────────────┐
-│   Dashboard       │   JWT (operador)      │                       │
-│   React            │ ─────────────────►   │                       │
-└─────────────────┘                       │      API NestJS       │
-                                            │   (la misma para      │ ───► PostgreSQL
-┌─────────────────┐                       │    ambos clientes)    │      (incidents)
-│  Sistema Legacy    │  x-api-key (sistema)  │                       │
-│  (PHP)              │ ─────────────────►   │                       │
-└─────────────────┘                       └──────────────────────┘
-```
-
-¿Por qué no le doy al script PHP un JWT como al dashboard? Porque un JWT representa la identidad de **una persona** (lleva su email, su rol). El script PHP no es una persona, es un sistema automatizado, y mezclarlo con el mecanismo de autenticación de usuarios sería forzar una abstracción que no corresponde. Si la `LEGACY_API_KEY` se filtra algún día, el daño se limita a "alguien puede leer incidentes abiertos" — no puede crear incidentes, no puede cambiar estados, no tiene ningún permiso de escritura. Es justo el principio de menor privilegio aplicado de forma simple.
-
-### Cómo funciona, paso a paso
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│ 1. El script PHP arranca (manual, o disparado por un cron      │
-│    en el sistema legacy real).                                 │
-│                                                                  │
-│ 2. Lee de variables de entorno:                                │
-│      API_BASE_URL   → dónde está la API nueva                  │
-│      LEGACY_API_KEY → su credencial de sistema                 │
-│                                                                  │
-│ 3. Arma la URL:                                                │
-│      GET /api/incidents?status=OPEN&page=1&limit=20            │
-│                                                                  │
-│ 4. Hace la petición con cURL, mandando la cabecera:             │
-│      x-api-key: <LEGACY_API_KEY>                                │
-│                                                                  │
-│ 5. La API valida la llave (ApiKeyGuard) →                      │
-│      si no coincide: 401, el script termina con error          │
-│      si coincide: 200 + JSON paginado                          │
-│                                                                  │
-│ 6. El script transforma la respuesta al formato mínimo que      │
-│    necesita el sistema legacy: id, aplicación, severidad,       │
-│    estado y fecha de creación — descarta el resto (descripción  │
-│    larga, relatedEventTraceIds, etc. no le sirven al legacy).   │
-│                                                                  │
-│ 7. Imprime el JSON resultante por salida estándar.              │
-└────────────────────────────────────────────────────────────────┘
-```
-
-Decidí no usar ningún framework PHP (Laravel, Symfony, etc.) para esto a propósito. La HU5 pide explícitamente un componente que "consulte incidentes abiertos" y "documente el mecanismo de integración" — un cliente HTTP simple con manejo de errores y paginación cumple el criterio completo. Meter un framework completo para un script de 100 líneas sería sobre-ingeniería sin ningún beneficio real, y complicaría el `docker-compose.yml` con una imagen mucho más pesada de lo necesario.
-
-### Manejo de errores
-
-El script no asume que la API siempre responde bien — y esto es importante porque, a diferencia del dashboard de React (donde un usuario ve el error en pantalla y reintenta), un sistema legacy corriendo en background necesita poder **detectar la falla mediante el código de salida del proceso**, no mediante una interfaz visual:
-
-```
-┌─────────────────────────┐     ┌─────────────────────────┐
-│  Falla de red/timeout     │     │  API responde, pero no    │
-│  (curl_errno != 0)        │     │  con 200                  │
-│         │                  │     │         │                  │
-│         ▼                  │     │         ▼                  │
-│  Escribe el error a        │     │  Escribe el código HTTP    │
-│  STDERR + imprime JSON      │     │  recibido y el cuerpo      │
-│  de diagnóstico             │     │  de la respuesta a STDERR  │
-│         │                  │     │         │                  │
-│         ▼                  │     │         ▼                  │
-│  exit(1)                   │     │  exit(1)                   │
-└─────────────────────────┘     └─────────────────────────┘
-```
-
-Cualquier proceso externo que invoque este script (un cron, otro programa) puede revisar el código de salida (`echo $?` después de correrlo) para saber si la consulta fue exitosa, sin tener que parsear el contenido de la respuesta.
-
-### Cómo correrlo
-
-**Dentro de Docker Compose**:
+Necesitas estas herramientas en tu máquina antes de empezar. Si ya las tienes instaladas, verifica las versiones mínimas.
 
 ```bash
-docker compose run --rm php-legacy
+# Verificar qué tienes instalado:
+docker --version          # Necesitas: 24.x o superior
+docker compose version    # Necesitas: v2.x (el comando es "docker compose", no "docker-compose")
+node --version            # Necesitas: 20.x (solo si quieres correr la API fuera de Docker)
+git --version             # Para clonar el repositorio
 ```
 
-Uso `run` y no `up` a propósito: este script no es un servicio de larga duración como la API o el frontend, es una tarea puntual que se ejecuta, imprime su resultado y termina. Si lo dejara como parte de `docker compose up`, el contenedor quedaría en estado "exited" apenas terminara, o reiniciando en bucle si le pongo `restart: always` — ninguna de las dos cosas tiene sentido para lo que es.
+**¿Por qué Docker Compose y no instalar las bases de datos localmente?**  
+PostgreSQL, MongoDB y Redis tienen instaladores distintos según el sistema operativo, diferentes versiones en conflicto, y puertos que pueden estar ocupados por otras aplicaciones. Docker Compose levanta las tres bases de datos en contenedores aislados con exactamente las versiones que el proyecto fue desarrollado (Postgres 15, Mongo 7, Redis 7), sin contaminar tu máquina. Con `docker compose down -v` vuelves a tener tu sistema exactamente como estaba.
 
-**Suelto, fuera de Docker** (si tienes PHP instalado localmente y la API corriendo en `localhost:3000`):
+### Instalación de Docker Desktop
 
+**macOS / Windows:**
+1. Ve a [https://docs.docker.com/desktop/](https://docs.docker.com/desktop/)
+2. Descarga Docker Desktop para tu sistema operativo
+3. Instala y abre la aplicación
+4. Verifica que el ícono de Docker aparezca en la barra de sistema (ballena azul)
+
+**Linux (Ubuntu/Debian):**
 ```bash
-cd backend/legacy
-API_BASE_URL=http://localhost:3000 LEGACY_API_KEY=legacy-php-dev-key-2026 php legacy-client.php
-```
+# Actualiza el índice de paquetes
+sudo apt-get update
 
-También acepta página y límite como argumentos posicionales:
+# Instala Docker Engine
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-```bash
-php legacy-client.php 2 10   # página 2, 10 incidentes por página
-```
+# Agrega tu usuario al grupo docker (para no necesitar sudo)
+sudo usermod -aG docker $USER
 
-### Ejemplo de salida
-
-```json
-{
-    "paginacion": {
-        "pagina_actual": 1,
-        "total_paginas": 3,
-        "total_registros": 47
-    },
-    "incidentes": [
-        {
-            "id": "a1b2c3d4-...",
-            "aplicacion": "payment-service",
-            "severidad": "CRITICAL",
-            "estado": "OPEN",
-            "creado_en": "2026-06-19T20:03:11.000Z"
-        }
-    ]
-}
+# Cierra sesión y vuelve a entrar para que el cambio de grupo surta efecto
+# Verifica:
+docker run hello-world
 ```
 
 ---
 
-## 8. Seguridad
+## 6. Variables de Entorno
 
-Hay tres mecanismos de seguridad distintos, cada uno protegiendo un actor diferente — no los puse "por las dudas", cada uno tiene una razón puntual:
+El proyecto usa tres archivos de entorno:
 
-- **JWT** protege los endpoints que usa el dashboard de React, donde hay un operador humano autenticado cuya identidad necesito para la auditoría (quién cambió el estado de un incidente).
-- **API Key** (`x-api-key`) protege el endpoint que consume el script PHP legacy. Es un sistema, no una persona, así que no le doy un token de sesión de usuario — si esa llave se filtra, el radio de daño es menor que si se filtra un JWT con permisos de operador.
-- **Throttler** protege `POST /api/events`, que es el único endpoint público sin autenticación (porque lo llaman sistemas externos arbitrarios), contra un bucle infinito o un ataque de saturación.
+| Archivo | Para qué | Cuándo usarlo |
+|---|---|---|
+| `.env.example` | Plantilla documentada (en el repositorio) | Punto de partida para copiar |
+| `.env.development` | Desarrollo local con Docker | Siempre en local |
+| `.env.test` | Pruebas automatizadas | `npm test` |
 
-> **Nota sobre el endpoint `POST /auth/token`:** es un emisor de token de desarrollo (devuelve un JWT con un usuario fijo), no un login real con validación de credenciales. Está así a propósito para el alcance del reto — la integración del dashboard con un proveedor de identidad real quedaría como siguiente paso fuera de estos 4 días.
+### Paso a paso para configurar el entorno
+
+```bash
+# 1. Copia el archivo de ejemplo
+cp .env.example .env.development
+```
+
+### Referencia completa de variables
+
+```bash
+# ────────────────────────────────────────────────────
+# ENTORNO
+# ────────────────────────────────────────────────────
+NODE_ENV=development       # Controla ConfigModule de NestJS
+PORT=3000                  # Puerto en el que escucha la API
+
+# ────────────────────────────────────────────────────
+# POSTGRESQL
+# Importante: el valor de POSTGRES_HOST depende de cómo corres la API:
+#   - API fuera de Docker (npm run start:dev en tu terminal): POSTGRES_HOST=localhost
+#   - API dentro de Docker (servicio "api" en docker-compose.yml): POSTGRES_HOST=postgres
+#     (el nombre del servicio Docker hace de hostname DNS interno)
+# ────────────────────────────────────────────────────
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=incidents_db
+POSTGRES_USER=admin
+POSTGRES_PASSWORD=secret
+
+# ────────────────────────────────────────────────────
+# MONGODB
+# Mismo criterio: "localhost" fuera de Docker, "mongo" dentro
+# ────────────────────────────────────────────────────
+MONGO_URI=mongodb://localhost:27017/events_db
+
+# ────────────────────────────────────────────────────
+# REDIS
+# Una instancia, dos bases lógicas:
+#   DB 0 = caché de métricas del dashboard
+#   DB 1 = cola de BullMQ para procesamiento de alertas
+# ────────────────────────────────────────────────────
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_CACHE_DB=0
+REDIS_QUEUE_DB=1
+
+# ────────────────────────────────────────────────────
+# SEGURIDAD
+# ────────────────────────────────────────────────────
+# JWT_SECRET: firma los tokens de los operadores del dashboard (humanos).
+# En producción: openssl rand -base64 32
+JWT_SECRET=incidentes-coordinadora-jwt-dev-2026
+
+# LEGACY_API_KEY: llave para el script PHP. Sistema-a-sistema, sin JWT de usuario.
+LEGACY_API_KEY=legacy-php-dev-key-2026
+
+# ────────────────────────────────────────────────────
+# FRONTEND (Vite) — el backend no las lee, están aquí de referencia
+# ────────────────────────────────────────────────────
+VITE_API_URL=http://localhost:3000
+VITE_WS_URL=ws://localhost:3000
+```
 
 ---
 
-## 9. Instalación y ejecución
+## 7. Guía de Instalación Detallada 
 
-### Requisitos
-- Docker y Docker Compose
-- Node.js 20+ (solo si quieres correr algo fuera de los contenedores)
+### Opción A — Todo en Docker 
 
-### Levantar todo el stack
+Esta opción levanta la API, el frontend y las tres bases de datos con un solo comando. Es la más sencilla para reproducir el entorno completo.
 
+**Paso 1: Clonar los repositorios**
 ```bash
-# desde la raíz del proyecto (donde está docker-compose.yml)
-cp backend/.env.example backend/.env.development   # ajusta valores si lo necesitas
-docker compose up
+# Crea una carpeta para el proyecto
+mkdir coordinadora-platform && cd coordinadora-platform
+
+# Clona el backend
+git clone <URL_REPO_BACKEND> backend-incident-platform
+cd backend-incident-platform
 ```
 
-Esto levanta 6 servicios: `postgres`, `mongo`, `redis`, `api` (NestJS), `frontend` (Vite) y `php-legacy`.
+> **Nota para el evaluador:** si tienes el zip, extráelo en la carpeta `coordinadora-platform/backend-incident-platform`.
 
-Para verificar que todo conectó bien:
-
+**Paso 2: Configurar variables de entorno**
 ```bash
+cp .env.example .env.development
+# No es necesario editar nada — los valores del .env.example funcionan con Docker
+```
+
+**Paso 3: Verificar la estructura de carpetas**
+
+El `docker-compose.yml` espera el frontend en `../frontend-incident-platform`. Si no tienes el frontend, comenta el servicio `frontend` en `docker-compose.yml`:
+```yaml
+# frontend:          # <-- comenta estas líneas si no tienes el frontend
+#   build: ../frontend-incident-platform
+#   ...
+```
+
+**Paso 4: Levantar todo el stack**
+```bash
+docker compose up --build
+
+# ¿Qué hace este comando?
+# --build: reconstruye la imagen de la API desde el Dockerfile (necesario la primera vez)
+#
+# Orden de inicio:
+# 1. postgres (espera hasta que el healthcheck pg_isready pase)
+# 2. mongo y redis (arrancan inmediatamente)
+# 3. api (espera a postgres healthy + mongo + redis started)
+# 4. frontend y php-legacy (esperan a api)
+#
+# El init.sql de Postgres se ejecuta automáticamente la primera vez que
+# el contenedor de postgres arranca con el volumen vacío.
+```
+
+**Paso 5: Verificar que todo levantó correctamente**
+```bash
+# En otra terminal, verifica el health check:
 curl http://localhost:3000/health
+
+# Respuesta esperada:
+# {
+#   "status": "ok",
+#   "info": {
+#     "postgres": { "status": "up" },
+#     "mongodb": { "status": "up" },
+#     "redis": { "status": "up" }
+#   }
+# }
 ```
 
-Debería responder con los tres checks (`postgres`, `mongodb`, `redis`) en estado `up`.
+**Paso 6: Acceder a los servicios**
 
-Para correr la consulta del sistema legacy en PHP (ver sección 7 para el detalle completo):
+| Servicio | URL | Descripción |
+|---|---|---|
+| API REST | http://localhost:3000/api | Base de todos los endpoints |
+| Swagger UI | http://localhost:3000/api/docs | Documentación interactiva |
+| Health Check | http://localhost:3000/health | Estado de las dependencias |
+| Frontend | http://localhost:5173 | Dashboard React (si lo tienes) |
+| PostgreSQL | localhost:5432 | Datos transaccionales |
+| MongoDB | localhost:27017 | Eventos y alertas |
+| Redis | localhost:6379 | Caché y cola |
 
+---
+
+### Opción B — API en local, bases de datos en Docker
+
+Esta opción es útil cuando desarrollas y quieres hot-reload de NestJS sin reconstruir la imagen Docker en cada cambio.
+
+**Paso 1: Levantar solo las bases de datos**
+```bash
+docker compose up postgres mongo redis -d
+# -d = detached mode (corre en background)
+```
+
+**Paso 2: Instalar dependencias de Node.js**
+```bash
+# Asegúrate de tener Node.js 20.x
+node --version  # debe mostrar v20.x.x
+
+npm install
+# Esto instala todas las dependencias listadas en package.json
+# Incluye devDependencies porque necesitas ts-jest para los tests
+```
+
+**Paso 3: Configurar el entorno local**
+```bash
+cp .env.example .env.development
+# IMPORTANTE: cuando la API corre fuera de Docker y las BDs dentro,
+# los hosts son "localhost", no los nombres de servicio Docker.
+# El .env.example ya tiene los valores correctos para este caso.
+```
+
+**Paso 4: Ejecutar migraciones / verificar esquema**
+```bash
+# El init.sql se ejecutó automáticamente cuando postgres arrancó.
+# Para verificar que las tablas existen:
+docker exec -it $(docker compose ps -q postgres) psql -U admin -d incidents_db -c "\dt"
+# Debe mostrar: incidents, incident_audit
+```
+
+**Paso 5: Correr la API en modo desarrollo**
+```bash
+npm run start:dev
+# NestJS compila y escucha cambios en los archivos TypeScript.
+# Verás en consola algo como:
+# [Nest] LOG [NestApplication] Nest application successfully started
+# Plataforma Operacional Backend corriendo en: http://localhost:3000/api
+# Swagger UI disponible en: http://localhost:3000/api/docs
+```
+
+---
+
+### Paso 7: Obtener un JWT para probar endpoints protegidos
+
+La mayoría de los endpoints de incidentes y el dashboard requieren autenticación JWT. Sigue estos pasos:
+
+**En Swagger UI:**
+1. Abre http://localhost:3000/api/docs
+2. Busca el endpoint `POST /api/auth/login`
+3. Usa el body:
+   ```json
+   { "username": "admin", "password": "admin123" }
+   ```
+4. Copia el token de la respuesta
+5. Haz clic en el botón **Authorize** (🔓) arriba a la derecha en Swagger
+6. En el campo `JWT (http, Bearer)`, pega el token (sin el prefijo "Bearer")
+7. Cierra el diálogo — ahora todos los requests de Swagger incluirán el header `Authorization: Bearer <token>`
+
+**Con curl:**
+```bash
+TOKEN=$(curl -s -X POST http://localhost:3000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin123"}' \
+  | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
+
+echo "Token obtenido: $TOKEN"
+```
+
+---
+
+## 8. Verificación por Base de Datos con Comandos Docker
+
+Esta sección te permite verificar, a nivel de base de datos, que cada operación persiste correctamente.
+
+---
+
+### 8.1 Conectarse a PostgreSQL
+
+```bash
+# Comando para abrir una sesión psql dentro del contenedor de Postgres
+docker exec -it $(docker compose ps -q postgres) psql -U admin -d incidents_db
+
+# Si prefieres usar el nombre del contenedor directamente:
+docker exec -it backend-incident-platform-postgres-1 psql -U admin -d incidents_db
+# (el nombre puede variar según cómo Docker nombró el contenedor)
+```
+
+**Por qué este comando:** `docker exec -it` ejecuta un comando interactivo dentro de un contenedor en ejecución. `psql -U admin -d incidents_db` abre el cliente de PostgreSQL con el usuario y base de datos configurados en el `docker-compose.yml`.
+
+**Consultas útiles dentro de psql:**
+
+```sql
+-- Ver las tablas existentes
+\dt
+
+-- Ver la estructura de la tabla incidents
+\d incidents
+
+-- Ver todos los incidentes (sin filtros)
+SELECT id, title, status, severity, affected_app, created_at
+FROM incidents
+ORDER BY created_at DESC;
+
+-- Ver el historial de auditoría de un incidente específico
+SELECT ia.old_status, ia.new_status, ia.changed_by, ia.changed_at, ia.trace_id
+FROM incident_audit ia
+WHERE ia.incident_id = 'UUID_DEL_INCIDENTE'
+ORDER BY ia.changed_at ASC;
+
+-- Contar incidentes por estado (lo que el dashboard debería mostrar)
+SELECT status, COUNT(*) as total
+FROM incidents
+GROUP BY status;
+
+-- Verificar que el array TEXT[] se guardó correctamente (no como CSV)
+SELECT id, related_event_trace_ids, pg_typeof(related_event_trace_ids)
+FROM incidents
+WHERE related_event_trace_ids IS NOT NULL
+LIMIT 5;
+-- pg_typeof debe mostrar "text[]", no "text"
+
+-- Salir de psql
+\q
+```
+
+---
+
+### 8.2 Conectarse a MongoDB
+
+```bash
+# Abrir mongosh dentro del contenedor de MongoDB
+docker exec -it $(docker compose ps -q mongo) mongosh events_db
+```
+
+**Por qué este comando:** `mongosh` es el shell de MongoDB. `events_db` es el nombre de la base de datos donde Mongoose guarda eventos y alertas (definido en `MONGO_URI`).
+
+**Consultas útiles dentro de mongosh:**
+
+```javascript
+// Ver las colecciones existentes
+show collections
+
+// Ver los eventos registrados (más recientes primero)
+db.events.find().sort({ occurredAt: -1 }).limit(5).pretty()
+
+// Contar eventos por aplicación (lo que usa el dashboard)
+db.events.aggregate([
+  { $group: { _id: "$application", count: { $sum: 1 } } },
+  { $sort: { count: -1 } }
+])
+
+// Contar eventos por severidad
+db.events.aggregate([
+  { $group: { _id: "$severity", count: { $sum: 1 } } }
+])
+
+// Ver los eventos CRITICAL (los que disparan alertas)
+db.events.find({ severity: "CRITICAL" }).pretty()
+
+// Ver las alertas generadas
+db.alerts.find().sort({ generatedAt: -1 }).limit(5).pretty()
+
+// Ver alertas por estado de procesamiento
+db.alerts.aggregate([
+  { $group: { _id: "$processingStatus", count: { $sum: 1 } } }
+])
+
+// Verificar la trazabilidad: dado un traceId de evento, encontrar su alerta
+db.events.findOne({ traceId: "TRACE_ID_AQUI" })
+db.alerts.findOne({ sourceTraceId: "TRACE_ID_AQUI" })
+
+// Ver los índices de la colección events
+db.events.getIndexes()
+
+// Salir de mongosh
+exit
+```
+
+---
+
+### 8.3 Conectarse a Redis
+
+```bash
+# Abrir redis-cli dentro del contenedor de Redis
+docker exec -it $(docker compose ps -q redis) redis-cli
+```
+
+**Por qué este comando:** `redis-cli` es el cliente de línea de comandos de Redis. Sin argumentos adicionales, se conecta al Redis local del contenedor en el puerto 6379.
+
+**Comandos útiles dentro de redis-cli:**
+
+```bash
+# Verificar conectividad
+PING
+# Respuesta esperada: PONG
+
+# ── DB 0: Caché de métricas ────────────────────────
+
+# Cambiar a la DB 0 (caché)
+SELECT 0
+
+# Ver si existe la clave de métricas en caché
+EXISTS dashboard:metrics
+# Respuesta: 1 si existe, 0 si no
+
+# Ver el contenido del caché de métricas
+GET dashboard:metrics
+# Respuesta: JSON con openIncidents, resolvedIncidents, cachedAt, etc.
+
+# Ver cuánto tiempo le queda al TTL (en segundos)
+TTL dashboard:metrics
+# Respuesta: número de segundos restantes (máximo 30)
+# -1 = sin TTL (no debería pasar)
+# -2 = la clave no existe
+
+# ── DB 1: Cola de BullMQ ────────────────────────────
+
+# Cambiar a la DB 1 (cola)
+SELECT 1
+
+# Ver las claves de BullMQ (jobs en la cola)
+KEYS *
+# Mostrará claves como:
+# bull:alert-processing:1 (job ID 1)
+# bull:alert-processing:active (set de jobs activos)
+# bull:alert-processing:completed (set de jobs completados)
+# bull:alert-processing:failed (set de jobs fallidos)
+# bull:alert-processing-failed:* (DLQ si hubo fallos)
+
+# Ver los jobs completados (los últimos 100 se mantienen por la config)
+LRANGE bull:alert-processing:completed 0 -1
+
+# Ver si hay jobs en la DLQ (fallidos después de 3 intentos)
+LRANGE bull:alert-processing-failed:failed 0 -1
+
+# Verificar cantidad de jobs en cada estado
+LLEN bull:alert-processing:wait      # esperando procesamiento
+LLEN bull:alert-processing:active    # procesándose ahora
+LLEN bull:alert-processing:completed # completados
+LLEN bull:alert-processing:failed    # fallidos (antes de DLQ)
+
+# Salir de redis-cli
+EXIT
+```
+
+**Por qué dos DBs separadas en la misma instancia Redis:**  
+La separación lógica por número de base de datos (DB0, DB1) permite que `KEYS *` en DB0 solo muestre claves de caché, sin mezclarlas con las claves de BullMQ. En producción, esto escalaría a instancias físicamente separadas (un Redis para caché, un Redis para la cola), con el mismo cambio de configuración en las variables de entorno.
+
+---
+
+## 9. Pruebas por Historia de Usuario (HU) — Paso a Paso
+
+> **Prerrequisito:** el stack completo debe estar corriendo (`docker compose up`), y debes tener un JWT válido (ver sección 7, Paso 7).
+
+---
+
+### HU1 — Registro de Eventos Operacionales
+
+**Objetivo:** el sistema acepta eventos de múltiples aplicaciones con su aplicación origen, tipo, descripción, severidad, fecha y traceId.
+
+**Paso 1: Registrar un evento de baja severidad (LOW)**
+```bash
+curl -X POST http://localhost:3000/api/events \
+  -H "Content-Type: application/json" \
+  -d '{
+    "application": "payment-service",
+    "eventType": "RESPONSE_SLOW",
+    "description": "El tiempo de respuesta supera los 500ms",
+    "severity": "LOW",
+    "occurredAt": "2026-06-21T10:00:00Z",
+    "metadata": { "responseTime": 523, "endpoint": "/api/checkout" }
+  }'
+
+# Respuesta esperada (201):
+# { "traceId": "uuid-generado-por-el-servidor" }
+```
+
+**Por qué no genera alerta:** la lógica en `register-event.use-case.ts` solo encola un job en BullMQ si `severity === 'CRITICAL'`. LOW, MEDIUM y HIGH solo persisten en MongoDB.
+
+**Verificación en MongoDB:**
+```bash
+docker exec -it $(docker compose ps -q mongo) mongosh events_db --eval \
+  "db.events.findOne({}, {}, { sort: { occurredAt: -1 } })"
+```
+
+**Paso 2: Registrar un evento CRITICAL (dispara alerta)**
+```bash
+TRACE=$(curl -s -X POST http://localhost:3000/api/events \
+  -H "Content-Type: application/json" \
+  -d '{
+    "application": "payment-service",
+    "eventType": "GATEWAY_TIMEOUT",
+    "description": "El gateway de pagos no responde tras 3 reintentos",
+    "severity": "CRITICAL",
+    "occurredAt": "2026-06-21T10:05:00Z",
+    "metadata": { "gateway": "Stripe", "attempts": 3 }
+  }' | grep -o '"traceId":"[^"]*"' | cut -d'"' -f4)
+
+echo "TraceId del evento: $TRACE"
+```
+
+**Verificación — trazabilidad evento → alerta:**
+```bash
+# 1. El evento en MongoDB
+docker exec -it $(docker compose ps -q mongo) mongosh events_db --eval \
+  "db.events.findOne({ traceId: '$TRACE' })"
+
+# 2. La alerta generada por el worker (espera ~1 segundo)
+sleep 2
+docker exec -it $(docker compose ps -q mongo) mongosh events_db --eval \
+  "db.alerts.findOne({ sourceTraceId: '$TRACE' })"
+
+# La alerta debe tener: processingStatus: "PROCESSED", sourceTraceId: "$TRACE"
+```
+
+**Paso 3: Verificar rate limiting**
+```bash
+# Enviar más de 100 requests en 60 segundos al mismo endpoint
+for i in {1..105}; do
+  curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:3000/api/events \
+    -H "Content-Type: application/json" \
+    -d '{"application":"test","eventType":"TEST","description":"test","severity":"LOW","occurredAt":"2026-01-01T00:00:00Z"}'
+done | sort | uniq -c
+# Los primeros 100 deben ser "201", los restantes "429"
+```
+
+---
+
+### HU2 — Gestión de Incidentes
+
+**Objetivo:** crear incidentes, actualizarlos, y validar que las transiciones de estado inválidas son rechazadas.
+
+**Paso 1: Crear un incidente**
+```bash
+INCIDENT_ID=$(curl -s -X POST http://localhost:3000/api/incidents \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "title": "Fallo en gateway de pagos",
+    "description": "El servicio de Stripe no responde tras múltiples intentos",
+    "affectedApplication": "payment-service",
+    "severity": "CRITICAL",
+    "assignee": "ops@empresa.com",
+    "relatedEventTraceIds": ["'"$TRACE"'"]
+  }' | grep -o '"id":"[^"]*"' | cut -d'"' -f4)
+
+echo "Incidente creado: $INCIDENT_ID"
+```
+
+**Verificación en PostgreSQL:**
+```bash
+docker exec -it $(docker compose ps -q postgres) psql -U admin -d incidents_db \
+  -c "SELECT id, title, status, severity, related_event_trace_ids FROM incidents WHERE id = '$INCIDENT_ID';"
+
+# Verificar la auditoría de creación
+docker exec -it $(docker compose ps -q postgres) psql -U admin -d incidents_db \
+  -c "SELECT old_status, new_status, changed_by, changed_at FROM incident_audit WHERE incident_id = '$INCIDENT_ID';"
+# Debe mostrar: old_status=OPEN, new_status=OPEN, changed_by=SYSTEM
+```
+
+**Paso 2: Transición de estado válida (OPEN → IN_PROGRESS)**
+```bash
+curl -X PATCH http://localhost:3000/api/incidents/$INCIDENT_ID/status \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{ "status": "IN_PROGRESS" }'
+
+# Respuesta esperada (200): el incidente con status actualizado
+
+# Verificar la nueva entrada de auditoría
+docker exec -it $(docker compose ps -q postgres) psql -U admin -d incidents_db \
+  -c "SELECT old_status, new_status, changed_by FROM incident_audit WHERE incident_id = '$INCIDENT_ID' ORDER BY changed_at;"
+# Debe mostrar 2 filas: OPEN→OPEN (creación) y OPEN→IN_PROGRESS (cambio)
+```
+
+**Paso 3: Transición de estado inválida (RESOLVED → IN_PROGRESS)**
+```bash
+# Primero, llevar el incidente a RESOLVED
+curl -s -X PATCH http://localhost:3000/api/incidents/$INCIDENT_ID/status \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{ "status": "RESOLVED" }'
+
+# Ahora intentar una transición inválida
+curl -X PATCH http://localhost:3000/api/incidents/$INCIDENT_ID/status \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{ "status": "IN_PROGRESS" }'
+
+# Respuesta esperada (409 Conflict):
+# {
+#   "statusCode": 409,
+#   "error": "CONFLICT",
+#   "message": "La transición de RESOLVED a IN_PROGRESS no está permitida",
+#   "traceId": "...",
+#   "timestamp": "..."
+# }
+```
+
+**Por qué el 409 y no un 400:** el 409 (Conflict) indica que la operación es semánticamente correcta (el formato del request es válido, el status que pides existe) pero entra en conflicto con el estado actual del recurso. Es la respuesta HTTP correcta para violaciones de reglas de negocio que dependen del estado, no para errores de validación de input.
+
+**Paso 4: Consultar incidentes con paginación y filtros**
+```bash
+# Filtrar incidentes abiertos, página 1, 20 por página
+curl "http://localhost:3000/api/incidents?status=OPEN&page=1&limit=20" \
+  -H "x-api-key: legacy-php-dev-key-2026"
+
+# Filtrar por severidad CRITICAL
+curl "http://localhost:3000/api/incidents?severity=CRITICAL" \
+  -H "x-api-key: legacy-php-dev-key-2026"
+
+# Verificar que limit=500 se acota o rechaza
+curl "http://localhost:3000/api/incidents?limit=500" \
+  -H "x-api-key: legacy-php-dev-key-2026"
+# El DTO tiene @Max(100), por lo que debería retornar 400 o acotar a 100
+```
+
+---
+
+### HU3 — Procesamiento Asíncrono de Alertas
+
+**Objetivo:** verificar que las alertas se generan automáticamente para eventos CRITICAL, con trazabilidad y manejo de reintentos.
+
+**Paso 1: Verificar la alerta generada en el HU1**
+El evento CRITICAL del paso HU1 ya generó una alerta. Verifica que esté en MongoDB:
+
+```bash
+# Ver todas las alertas en la colección
+docker exec -it $(docker compose ps -q mongo) mongosh events_db --eval \
+  "db.alerts.find().sort({ generatedAt: -1 }).limit(5).pretty()"
+
+# Verificar que el status es PROCESSED, no PENDING ni FAILED
+docker exec -it $(docker compose ps -q mongo) mongosh events_db --eval \
+  "db.alerts.countDocuments({ processingStatus: 'PROCESSED' })"
+```
+
+**Paso 2: Verificar los logs del worker**
+```bash
+# Ver los logs del contenedor de la API para buscar los mensajes del worker
+docker logs $(docker compose ps -q api) 2>&1 | grep "ALERT"
+# Deberías ver:
+# {"action":"ALERT_QUEUED","traceId":"..."}
+# {"action":"ALERT_PROCESSING_STARTED","traceId":"...","jobId":"1"}
+# {"action":"ALERT_PROCESSING_COMPLETED","traceId":"...","alertId":"..."}
+```
+
+**Paso 3: Verificar los jobs en Redis**
+```bash
+docker exec -it $(docker compose ps -q redis) redis-cli SELECT 1
+# Luego:
+KEYS *
+LLEN bull:alert-processing:completed
+```
+
+---
+
+### HU4 — Dashboard Operacional en Tiempo Real
+
+**Objetivo:** verificar el Cache Aside Pattern y la actualización en tiempo real.
+
+**Paso 1: Primera llamada al dashboard (MISS de caché)**
+```bash
+curl -s http://localhost:3000/api/dashboard/metrics \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+
+# Respuesta incluirá:
+# {
+#   "openIncidents": N,
+#   "resolvedIncidents": M,
+#   "eventsByApp": [...],
+#   "eventsBySeverity": [...],
+#   "recentAlerts": [...],
+#   "cachedAt": "2026-06-21T10:15:00.000Z"  ← timestamp del cálculo
+# }
+```
+
+**Verificar que el resultado fue cacheado:**
+```bash
+docker exec -it $(docker compose ps -q redis) redis-cli GET dashboard:metrics
+# Debe retornar el JSON de las métricas
+docker exec -it $(docker compose ps -q redis) redis-cli TTL dashboard:metrics
+# Debe retornar un número entre 1 y 30
+```
+
+**Paso 2: Segunda llamada (HIT de caché)**
+```bash
+METRICS1=$(curl -s http://localhost:3000/api/dashboard/metrics \
+  -H "Authorization: Bearer $TOKEN")
+METRICS2=$(curl -s http://localhost:3000/api/dashboard/metrics \
+  -H "Authorization: Bearer $TOKEN")
+
+# Extraer cachedAt de ambas respuestas
+echo "Primera:  $(echo $METRICS1 | grep -o '"cachedAt":"[^"]*"')"
+echo "Segunda:  $(echo $METRICS2 | grep -o '"cachedAt":"[^"]*"')"
+# El cachedAt debe ser IDÉNTICO — confirma que la segunda respuesta vino del caché
+```
+
+**Paso 3: Verificar invalidación activa**
+```bash
+# Cambiar el status de un incidente
+curl -s -X PATCH http://localhost:3000/api/incidents/$INCIDENT_ID/status \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{ "status": "OPEN" }'
+
+# Inmediatamente después, el caché debe estar vacío (invalidado):
+docker exec -it $(docker compose ps -q redis) redis-cli EXISTS dashboard:metrics
+# Respuesta: 0 (la clave fue eliminada)
+
+# La siguiente llamada al dashboard volverá a calcular y a cachear:
+curl -s http://localhost:3000/api/dashboard/metrics \
+  -H "Authorization: Bearer $TOKEN" | grep cachedAt
+# El timestamp es posterior al anterior
+```
+
+**Paso 4: Verificar los filtros del dashboard**
+```bash
+# Filtrar incidentes por aplicación en el listado
+curl "http://localhost:3000/api/incidents?application=payment-service" \
+  -H "x-api-key: legacy-php-dev-key-2026"
+
+# Filtrar por fecha (si el endpoint lo soporta — verificar en Swagger)
+curl "http://localhost:3000/api/incidents?status=OPEN&severity=HIGH" \
+  -H "x-api-key: legacy-php-dev-key-2026"
+```
+
+---
+
+### HU5 — Integración con Sistema Legacy PHP
+
+**Objetivo:** el script PHP consume la misma API REST estándar usando x-api-key, sin rutas especiales.
+
+**Paso 1: Ejecutar el cliente PHP desde Docker**
 ```bash
 docker compose run --rm php-legacy
+
+# Salida esperada:
+# ──────────────────────────────────────────────
+#  Sistema Legacy PHP — Consulta de Incidentes
+# ──────────────────────────────────────────────
+# Consultando: http://api:3000/api/incidents?status=OPEN&page=1&limit=20
+#
+# {
+#   "paginacion": {
+#     "pagina_actual": 1,
+#     "total_paginas": 1,
+#     "total_registros": 2
+#   },
+#   "incidentes": [
+#     {
+#       "id": "uuid-...",
+#       "aplicacion": "payment-service",
+#       "severidad": "CRITICAL",
+#       "estado": "OPEN",
+#       "creado_en": "2026-06-21T10:00:00.000Z"
+#     }
+#   ]
+# }
+#
+# ──────────────────────────────────────────────
+#  Total de incidentes abiertos encontrados: 1
+# ──────────────────────────────────────────────
 ```
 
-### Levantar el backend solo, en modo desarrollo (fuera de Docker)
-
+**Paso 2: Ejecutar con paginación custom**
 ```bash
-cd backend
-cp .env.example .env.development   # completa los valores
-npm install
-npm run start:dev
+# Segunda página, 5 incidentes por página
+docker compose run --rm php-legacy php legacy-client.php 2 5
 ```
 
-La API queda en `http://localhost:3000/api`, y Swagger en `http://localhost:3000/api/docs`.
+**Paso 3: Verificar que sin x-api-key el endpoint da 401**
+```bash
+curl -s -o /dev/null -w "%{http_code}" \
+  "http://localhost:3000/api/incidents?status=OPEN"
+# Respuesta: 401 (Unauthorized)
 
-### Reinicio limpio (sin datos previos)
+curl -s -o /dev/null -w "%{http_code}" \
+  "http://localhost:3000/api/incidents?status=OPEN" \
+  -H "x-api-key: legacy-php-dev-key-2026"
+# Respuesta: 200
+```
+
+**Por qué ApiKey para el PHP y no JWT:** el script PHP es un sistema, no un usuario humano. Los JWTs tienen expiración y requieren un flujo de login interactivo. Una API Key es el mecanismo estándar para autenticación sistema-a-sistema: el sistema la conoce de antemano y no necesita renovarla cada 24h. Si la API Key se filtra, su radio de daño es menor que el de un JWT que pueda tener permisos de escritura.
+
+---
+
+## 9. Pruebas Unitarias y de Integración
+
+### Descripción de la estrategia de pruebas
+
+El proyecto usa **tres tipos de prueba** con distintos niveles de aislamiento:
+
+**1. Prueba de dominio puro (sin ningún mock):**
+`incident-status.vo.spec.ts` prueba la máquina de estados de `IncidentStatus` instanciando la clase directamente. No levanta NestJS, no usa Jest mocks, no necesita base de datos. Si esta prueba pasa, la regla de negocio más crítica del sistema es correcta.
+
+**2. Pruebas de integración con mocks manuales:**
+`create-incident.use-case.integration.spec.ts` y `update-incident-status.use-case.integration.spec.ts` usan `@nestjs/testing` para instanciar los casos de uso con repositorios y servicios reemplazados por objetos `jest.fn()`. Esto prueba la orquestación del caso de uso (qué llama, con qué argumentos, en qué orden) sin tocar la base de datos real.
+
+**3. Prueba de integración con la cola:**
+`register-event.use-case.integration.spec.ts` verifica que un evento CRITICAL encola un job en BullMQ con los campos correctos (`eventId`, `traceId`, etc.) usando un mock de la `Queue`.
+
+**Por qué "integración" si usa mocks:** en el contexto DDD, "integración" se refiere a que se prueban múltiples capas trabajando juntas (caso de uso + Value Object + repositorio), no que se integra con infraestructura real. La nomenclatura es intencional para distinguir estas pruebas de los tests de unidad del dominio puro.
+
+### Ejecutar las pruebas
 
 ```bash
-docker compose down -v && docker compose up
+# Ejecutar todas las pruebas (requiere Node.js en tu máquina)
+npm test
+
+# Con reporte de cobertura
+npm run test:cov
+
+# Modo watch (re-ejecuta al guardar cambios)
+npm run test:watch
+
+# Ejecutar solo un archivo específico
+npx jest incident-status.vo.spec.ts
+
+# Ejecutar pruebas que matcheen un patrón
+npx jest --testNamePattern="debe permitir la transición"
+```
+
+### Lo que cada suite prueba
+
+**`incident-status.vo.spec.ts` (prueba de dominio):**
+```
+✓ Inicializa estado OPEN válido
+✓ Lanza excepción con estado inexistente
+✓ OPEN → IN_PROGRESS: permitido
+✓ OPEN → RESOLVED: prohibido (salto de estado)
+✓ IN_PROGRESS → RESOLVED: permitido
+✓ IN_PROGRESS → OPEN: permitido (reapertura)
+✓ RESOLVED → IN_PROGRESS: prohibido (incidente congelado)
+✓ RESOLVED → OPEN: prohibido (incidente congelado)
+```
+
+**`create-incident.use-case.integration.spec.ts`:**
+```
+✓ Persiste el incidente y devuelve la entidad guardada
+✓ Construye la entidad con status inicial OPEN (ignorando cualquier status en el DTO)
+✓ Asigna 'UNASSIGNED' cuando no se provee assignee
+✓ Crea el registro de auditoría con oldStatus=OPEN y newStatus=OPEN
+✓ Incluye los relatedEventTraceIds del DTO en la entidad
+✓ Inicializa relatedEventTraceIds como [] cuando no se provee
+✓ Invoca invalidateAndBroadcast después de persistir
+✓ Invoca invalidateAndBroadcast incluso con campos mínimos
+✓ Propaga el error si saveWithAudit falla (no llama broadcast)
+✓ Lanza el error si invalidateAndBroadcast falla tras persistir
+```
+
+**`update-incident-status.use-case.integration.spec.ts`:**
+```
+✓ Transiciona de OPEN a IN_PROGRESS y registra auditoría
+✓ Transiciona de IN_PROGRESS a RESOLVED correctamente
+✓ Lanza ConflictException en transición inválida RESOLVED → IN_PROGRESS
+✓ No llama saveWithAudit si la transición es inválida
+✓ Llama emitIncidentUpdated en el gateway con el incidente actualizado
+✓ Llama invalidateAndBroadcast después de una transición exitosa
+✓ Lanza NotFoundException si el incidente no existe
+```
+
+**`register-event.use-case.integration.spec.ts`:**
+```
+✓ Registra el evento en MongoDB y encola job en BullMQ si es CRITICAL
 ```
 
 ---
 
-## 10. Variables de entorno
+## 10. Estrategia de Escalamiento en Producción
 
-`.env.example` es la plantilla que sí se sube al repo (a diferencia de `.env.development`, que está en `.gitignore` porque ahí van credenciales). Cualquiera que clone el proyecto hace:
+La plataforma fue diseñada con escalamiento horizontal en mente desde el inicio. Esta sección explica cómo cada componente escalaría.
 
-```bash
-cp backend/.env.example backend/.env.development
-cp frontend/.env.example frontend/.env
+### Nivel 1 — API NestJS
+
+El backend es stateless (no guarda estado en memoria entre requests). Cualquier número de instancias puede correr en paralelo detrás de un load balancer:
+
+```
+Internet
+   │
+Load Balancer (NGINX / AWS ALB)
+   │          │          │
+API v1      API v2     API v3
+(port 3000) (port 3001) (port 3002)
+   │
+PostgreSQL / MongoDB / Redis (compartidos)
 ```
 
-y el proyecto levanta sin tener que inventar ni pedir ningún valor — los datos de `.env.example` ya coinciden exactamente con los que usa `docker-compose.yml` (mismo usuario de Postgres, mismo nombre de base, mismos puertos). No son placeholders genéricos tipo `<TU_CLAVE_AQUI>`; son los valores reales con los que el proyecto funciona en local, porque para una prueba técnica no tiene sentido esconder un secreto que de todas formas necesita el evaluador para correr el repo.
+**Lo que hay que revisar antes de escalar la API:**
+- `ThrottlerModule` usa almacenamiento en memoria por defecto. Con múltiples instancias, el límite se aplica por instancia, no globalmente. En producción, usar `@nestjs/throttler` con `ThrottlerStorageRedisService` para un rate limit compartido.
+- Las WebSockets con `socket.io` requieren un `Redis adapter` para que eventos emitidos en una instancia lleguen a clientes conectados a otra instancia. Instalar `@socket.io/redis-adapter`.
 
-`ConfigModule` valida estas variables al arrancar con un schema de Joi — si falta una requerida, la aplicación ni siquiera levanta. Prefiero que falle de entrada con un mensaje claro de "te falta esta variable", a que falle más adelante con un error críptico de conexión a la base de datos.
+### Nivel 2 — BullMQ Workers
 
-Un detalle a tener en cuenta con `POSTGRES_HOST`, `MONGO_URI` y `REDIS_HOST`: el valor depende de **dónde corre el backend**. Si lo corres con `npm run start:dev` en tu máquina mientras las bases de datos están en contenedores, el host es `localhost`. Si el backend también corre dentro de `docker-compose` (el servicio `api`), el host pasa a ser el nombre del servicio (`postgres`, `mongo`, `redis`), porque dentro de la red interna de Docker los contenedores se resuelven por nombre, no por `localhost`. El `.env.example` trae comentado este detalle para no tener que adivinarlo.
+Los workers son horizontalmente escalables por diseño de BullMQ: múltiples instancias consumen la misma cola concurrentemente, y BullMQ garantiza que cada job se procese exactamente una vez:
 
-Ver `backend/.env.example` para la lista completa con comentarios sobre qué hace cada variable, `backend/.env.test` para los valores que usa la suite de pruebas (bases y números de Redis separados de development, para no pisar datos), y `frontend/.env.example` para las del cliente.
-
----
-
-## 11. Pruebas
-
-```bash
-npm run test        # unitarias
-npm run test:e2e     # integración (supertest, requiere las bases levantadas)
-npm run test:cov     # con reporte de cobertura
+```
+Redis DB1 (cola)
+      │
+   [job 1] [job 2] [job 3] [job 4]
+      │          │          │
+ Worker A    Worker B   Worker C
+(instancia 1)(instancia 2)(instancia 3)
 ```
 
-Las pruebas unitarias cubren reglas de dominio puras (transiciones de `IncidentStatus`) y casos de uso con repositorios mockeados (qué pasa cuando un evento es `CRITICAL` vs `LOW`, qué pasa cuando una transición de estado es inválida). Las de integración usan `supertest` contra la app real, levantando las bases de datos configuradas en `.env.test`.
+Para el reto técnico, el worker corre en el mismo proceso que la API. En producción, se movería a un servicio separado (`worker.service.ts`) con su propio Dockerfile.
+
+### Nivel 3 — PostgreSQL
+
+```
+Escrituras → Primary (incidentes, auditoría)
+Lecturas   → Read Replica 1 (dashboard, listados paginados)
+           → Read Replica 2 (reportes, exports)
+```
+
+El dashboard solo hace lecturas (`countByStatus`, etc.). Redirigir esas queries a una réplica de lectura reduce la carga del primary sin cambiar el código de la API (solo cambiar la string de conexión de TypeORM para el caso de uso del dashboard).
+
+### Nivel 4 — MongoDB
+
+MongoDB tiene sharding horizontal nativo. Para el caso de eventos de alto volumen:
+- Shard key: `{ application: 1, occurredAt: -1 }` — distribuye los documentos por aplicación y fecha, que son los campos más usados en los filtros del dashboard.
+
+### Nivel 5 — Redis
+
+```
+Actual (desarrollo): una instancia, DB0 + DB1
+Producción mínima:   Redis Sentinel (3 nodos: 1 primary + 2 réplicas + 3 sentinels)
+Producción alta:     Redis Cluster (6 nodos: 3 primaries + 3 réplicas)
+```
+
+El único cambio en el código: en `BullModule.forRootAsync` y en `RedisModule`, cambiar la config de `{ host, port, db }` por una config de cluster o sentinel. La lógica de negocio no se toca.
 
 ---
 
-## 12. Documentación de la API
+## 12. Trade-offs y Decisiones Pendientes (Honestidad Técnica)
 
-Con el backend corriendo: `http://localhost:3000/api/docs`
+Esta sección documenta las decisiones donde se eligió una opción sobre otra con conciencia de los compromisos, y las mejoras que quedarían para una iteración posterior.
 
-Los tres endpoints más relevantes del flujo (`POST /events`, `POST /incidents`, `PATCH /incidents/:id/status`) tienen ejemplos de payload completos en Swagger. El resto de endpoints están documentados con su resumen y los códigos de respuesta posibles.
+### 12.1 Trade-offs aceptados
+
+**T1 — `synchronize: false` vs migraciones explícitas**
+
+Se eligió `synchronize: false` con el `init.sql` como fuente de verdad del esquema. Esto significa que las entidades TypeORM deben mantenerse sincronizadas manualmente con el DDL. El beneficio: nunca hay un `DROP COLUMN` accidental. El costo: si agregas un campo a la entidad y olvidas actualizar el `init.sql`, la aplicación lanza un error en el primer query que use ese campo.
+
+En producción con TypeORM: agregar migraciones con `npx typeorm migration:generate` es el siguiente paso obvio.
+
+**T2 — Caché de métricas con TTL de 30 segundos + invalidación activa**
+
+El TTL de 30 segundos existe como red de seguridad. La invalidación activa debería asegurarse de que el caché siempre esté fresco. El riesgo: si `MetricsBroadcastService.invalidateAndBroadcast()` falla (por un error no capturado), el dashboard podría mostrar datos con hasta 30 segundos de retraso. En producción, se agregaría un try-catch en el broadcast que loguee el error pero no interrumpa el flujo principal de negocio.
+
+**T3 — `forwardRef` en MetricsBroadcastService**
+
+La dependencia circular entre `MetricsBroadcastService` (en `shared`) y `GetDashboardMetricsUseCase` (en `dashboard`) se resolvió con `forwardRef`. Es una solución funcional pero indica un acoplamiento de diseño. La solución más limpia sería usar el patrón de eventos de NestJS (`EventEmitter2`) para que `MetricsBroadcastService` emita un evento `metrics.invalidated` y `DashboardModule` lo escuche, eliminando la dependencia directa.
+
+**T4 — Dockerfile sin multi-stage build**
+
+El Dockerfile actual instala devDependencies y corre en modo `start:dev` (con watcher de archivos). Para producción, el Dockerfile correcto sería:
+
+```dockerfile
+# Stage 1: build
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+# Stage 2: runtime
+FROM node:20-alpine AS runtime
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
+COPY --from=builder /app/dist ./dist
+EXPOSE 3000
+CMD ["node", "dist/main"]
+```
+
+Esto reduce el tamaño de la imagen de ~800MB a ~200MB y elimina los devDependencies del contenedor de producción.
+
+**T5 — Tests de integración HTTP con supertest no implementados**
+
+Los tests actuales son de aplicación (casos de uso con mocks). Los tests de integración HTTP completos (como `POST /api/events → 201`, `PATCH /api/incidents/:id/status → 409`) usando `supertest` con `TestingModule` no están implementados. Esto requeriría un módulo de test con bases de datos embebidas (postgres en memoria no existe nativamente, pero hay opciones como `testcontainers`). Para el alcance de 4 días, se priorizaron los tests de dominio y aplicación.
+
+### 12.2 Decisiones pendientes para producción
+
+**D1 — Autenticación y registro de usuarios**
+
+El endpoint `POST /api/auth/login` actualmente valida contra credenciales hardcodeadas en `auth.module.ts`. En producción: tabla `users` en PostgreSQL con passwords hasheadas con bcrypt, refresh tokens con rotación, y posiblemente integración con OAuth 2.0 / SAML.
+
+**D2 — TTL Index en MongoDB para eventos**
+
+Los eventos se acumulan indefinidamente. En producción, agregar un TTL Index para eliminar automáticamente eventos con más de 90 días:
+```javascript
+db.events.createIndex({ occurredAt: 1 }, { expireAfterSeconds: 7776000 })
+```
+
+**D3 — Rate Limiting por usuario, no por IP**
+
+El Throttler actual limita por IP. En un entorno corporativo con NAT, cientos de usuarios pueden compartir la misma IP pública. En producción: rate limiting por `x-api-key` o por `userId` del JWT.
+
+**D4 — Métricas de observabilidad (Prometheus + Grafana)**
+
+El logging estructurado por JSON está implementado (todos los logs incluyen `action`, `traceId`, `timestamp`). El siguiente paso natural es exportar esos logs a un sistema de métricas (Prometheus con `@willsoto/nestjs-prometheus`, o enviarlos a Datadog/New Relic) para alertas proactivas basadas en tasas de error, latencia de endpoints y profundidad de la cola BullMQ.
+
+**D5 — Frontend no incluido en este repositorio**
+
+El backend está diseñado como API-first: todos los endpoints están documentados en Swagger y son consumibles por cualquier frontend. El React Dashboard existe en un repositorio separado. Para la evaluación, el backend puede evaluarse completamente con Swagger UI o Postman sin el frontend.
 
 ---
-
-## 13. Decisiones que quedaron pendientes / fuera de alcance
-
-Para ser transparente sobre el estado real del proyecto:
-
-- No hay migraciones de TypeORM generadas como archivos — el esquema se crea actualmente a través de `infra/init.sql` montado en el contenedor de Postgres en el primer arranque.
-
-
