@@ -13,7 +13,9 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U admin"]
       interval: 5s
+      timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   mongo:
     image: mongo:7
@@ -21,35 +23,55 @@ services:
       - "27017:27017"
     volumes:
       - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
 
   api:
     build: .
-    ports: ["3000:3000"]
+    ports:
+      - "3000:3000"
     env_file: ./.env.development
     environment:
-      # Sobrescribimos el host del .env para que la red de Docker se entienda entre contenedores
       POSTGRES_HOST: postgres
       MONGO_URI: mongodb://mongo:27017/events_db
       REDIS_HOST: redis
     depends_on:
       postgres: { condition: service_healthy }
-      mongo: { condition: service_started }
-      redis: { condition: service_started }
+      mongo:    { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    restart: unless-stopped
 
   frontend:
     build: ../frontend-incident-platform
-    ports: ["5173:5173"]
+    ports:
+      - "5173:5173"
+    volumes:
+      # Monta solo src e index.html: Vite detecta cambios y recarga en el navegador
+      # sin necesidad de reconstruir la imagen (HMR en tiempo real)
+      - ../frontend-incident-platform/src:/app/src
+      - ../frontend-incident-platform/index.html:/app/index.html
     environment:
       VITE_API_URL: http://localhost:3000
       VITE_WS_URL: ws://localhost:3000
-    depends_on: [api]
+    depends_on:
+      api: { condition: service_started }
+    restart: unless-stopped
 
-  # ── Sistema legacy en PHP (HU5) ──────────────────────────────────
   php-legacy:
     image: php:8.2-cli
     volumes:
@@ -59,7 +81,8 @@ services:
       API_BASE_URL: http://api:3000
       LEGACY_API_KEY: legacy-php-dev-key-2026
     command: php legacy-client.php
-    depends_on: [api]
+    depends_on:
+      api: { condition: service_started }
 
 volumes:
   postgres_data:

@@ -6,16 +6,14 @@ import { UpdateIncidentStatusUseCase } from './application/use-cases/update-inci
 import { IncidentOrmEntity } from './infrastructure/persistence/entities/incident.orm-entity';
 import { IncidentAuditOrmEntity } from './infrastructure/persistence/entities/incident-audit.orm-entity';
 import { TypeOrmIncidentRepository } from './infrastructure/persistence/typeorm-incident.repository';
-import { WebsocketsModule } from '../websockets/websockets.module';
 import { AlertsModule } from '../alerts/alerts.module';
-import { AuthModule } from '../shared/auth.module'; 
+import { AuthModule } from '../shared/auth.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([IncidentOrmEntity, IncidentAuditOrmEntity]),
-    WebsocketsModule,
-    forwardRef(() => AlertsModule), 
-    AuthModule
+    forwardRef(() => AlertsModule),
+    AuthModule,
   ],
   controllers: [IncidentController],
   providers: [
