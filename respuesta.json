@@ -1,0 +1,1 @@
+{"status":"ok","info":{"postgres":{"status":"up"},"mongodb":{"status":"up"},"redis":{"status":"up"}},"error":{},"details":{"postgres":{"status":"up"},"mongodb":{"status":"up"},"redis":{"status":"up"}}}
