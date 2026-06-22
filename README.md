@@ -2,7 +2,7 @@
  
 > **README Maestro de la Solución Global**
 >
-> Este documento reside en la raíz del repositorio de Backend pero documenta el ecosistema completo: Backend (NestJS/DDD), Frontend (React) y Script de Integración Legacy (PHP). Consulta la sección [§10 Instalación y Ejecución](#10-instalación-y-ejecución) para clonar ambos repositorios de forma coordinada antes de ejecutar Docker Compose.
+> Este documento vive en la raíz del repositorio de Backend pero cubre el ecosistema completo: Backend (NestJS/DDD), Frontend (React) y Script de Integración Legacy (PHP). Antes de ejecutar Docker Compose, consulta la sección [§10 Instalación y Ejecución](#10-instalación-y-ejecución) para clonar ambos repositorios de forma coordinada.
  
 ---
  
@@ -26,7 +26,7 @@
  
 ## 1. Vista General y Justificación Tecnológica
  
-La plataforma centraliza el ciclo de vida operacional de una empresa de tecnología que procesa miles de transacciones diarias: ingesta eventos desde múltiples sistemas externos, convierte eventos críticos en incidentes rastreables, genera alertas de forma asíncrona y expone métricas en tiempo real a un dashboard React. La solución es además interoperable con sistemas heredados PHP mediante una API autenticada por API Key.
+La plataforma centraliza el ciclo de vida operacional de una empresa de tecnología que procesa miles de transacciones diarias: ingesta eventos desde múltiples sistemas externos, convierte los eventos críticos en incidentes rastreables, genera alertas de forma asíncrona y expone métricas en tiempo real a un dashboard React. También es interoperable con sistemas heredados PHP mediante una API autenticada por API Key.
  
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
@@ -54,11 +54,11 @@ La plataforma centraliza el ciclo de vida operacional de una empresa de tecnolog
  
 #### PostgreSQL
  
-Almacena las tablas `incidents` e `incident_audit`. Esta elección responde a la necesidad de consistencia ACID estricta: crear un incidente y registrar su entrada de auditoría inicial deben ocurrir dentro de la misma transacción o fallar juntos. El motor define además tipos `ENUM` nativos (`incident_status`, `severity_level`) e índices compuestos sobre `status`, `severity`, `affected_app` y `created_at DESC` para soportar los filtros del dashboard sin full-scans.
+Almacena las tablas `incidents` e `incident_audit`. La elección responde a la necesidad de consistencia ACID estricta: crear un incidente y registrar su auditoría inicial deben ocurrir dentro de la misma transacción o fallar juntos. El motor define además tipos `ENUM` nativos (`incident_status`, `severity_level`) e índices compuestos sobre `status`, `severity`, `affected_app` y `created_at DESC` para soportar los filtros del dashboard sin full-scans.
  
 #### MongoDB
  
-Almacena las colecciones `events` y `alerts`. Los eventos operacionales provienen de múltiples aplicaciones con esquemas heterogéneos: incluyen un campo `metadata` libre (`Record<string, any>`) que varía por sistema origen. La naturaleza documental de MongoDB permite ingestar este volumen variable sin migraciones de esquema, y sus operaciones de agregación (`$group`) calculan directamente las métricas `eventsByApp` y `eventsBySeverity` para el dashboard.
+Almacena las colecciones `events` y `alerts`. Los eventos operacionales provienen de múltiples aplicaciones con esquemas heterogéneos: incluyen un campo `metadata` libre (`Record<string, any>`) que varía según el sistema origen. La naturaleza documental de MongoDB permite ingestar este volumen variable sin migraciones de esquema, y sus operaciones de agregación (`$group`) calculan directamente las métricas `eventsByApp` y `eventsBySeverity` para el dashboard.
  
 #### Redis — Doble Rol
  
@@ -98,11 +98,10 @@ El archivo `src/modules/incidents/domain/value-objects/incident-status.vo.ts` en
  
 ```typescript
 export class IncidentStatus {
-  // Matriz estricta de transiciones permitidas por el negocio
   private static readonly VALID_TRANSITIONS: Record<string, string[]> = {
     OPEN:        ['IN_PROGRESS'],
-    IN_PROGRESS: ['RESOLVED', 'OPEN'],  // 'OPEN' permite reaperturas
-    RESOLVED:    [],                     // Un incidente resuelto queda congelado
+    IN_PROGRESS: ['RESOLVED', 'OPEN'],  // permite reaperturas
+    RESOLVED:    [],                     // un incidente resuelto queda congelado
   };
  
   constructor(private readonly value: string) {
@@ -112,7 +111,6 @@ export class IncidentStatus {
     }
   }
  
-  // Valida si es posible avanzar del estado actual al solicitado
   canTransitionTo(next: IncidentStatus): boolean {
     return IncidentStatus.VALID_TRANSITIONS[this.value].includes(next.getValue());
   }
@@ -122,7 +120,7 @@ export class IncidentStatus {
 }
 ```
  
-El caso de uso `UpdateIncidentStatusUseCase` instancia dos `IncidentStatus` (el actual y el deseado) y llama `current.canTransitionTo(next)` antes de persistir. Si la transición es inválida, lanza un `ConflictException` que el `GlobalExceptionFilter` serializa como **HTTP 409**.
+`UpdateIncidentStatusUseCase` instancia dos `IncidentStatus` (el actual y el deseado) y llama `current.canTransitionTo(next)` antes de persistir. Si la transición es inválida, lanza un `ConflictException` que el `GlobalExceptionFilter` serializa como **HTTP 409**.
  
 ---
  
@@ -143,22 +141,21 @@ async saveWithAudit(incident: Incident, audit: IncidentAudit): Promise<Incident>
   try {
     const savedEntity = await queryRunner.manager.save(IncidentOrmEntity, ormEntity);
  
-    const ormAudit         = new IncidentAuditOrmEntity();
-    ormAudit.incidentId    = savedEntity.id;
-    ormAudit.oldStatus     = audit.oldStatus;
-    ormAudit.newStatus     = audit.newStatus;
-    ormAudit.changedBy     = audit.changedBy;
-    ormAudit.traceId       = audit.traceId;
+    const ormAudit       = new IncidentAuditOrmEntity();
+    ormAudit.incidentId  = savedEntity.id;
+    ormAudit.oldStatus   = audit.oldStatus;
+    ormAudit.newStatus   = audit.newStatus;
+    ormAudit.changedBy   = audit.changedBy;
+    ormAudit.traceId     = audit.traceId;
  
     await queryRunner.manager.save(IncidentAuditOrmEntity, ormAudit);
- 
     await queryRunner.commitTransaction();
     return this.toDomain(savedEntity);
   } catch (error) {
     await queryRunner.rollbackTransaction();
     throw error;
   } finally {
-    await queryRunner.release(); // Siempre libera la conexión al pool
+    await queryRunner.release();
   }
 }
 ```
@@ -167,10 +164,9 @@ async saveWithAudit(incident: Incident, audit: IncidentAudit): Promise<Incident>
  
 **Archivo:** `src/modules/incidents/infrastructure/persistence/entities/incident.orm-entity.ts`
  
-La columna `relatedEventTraceIds` usa el tipo nativo de PostgreSQL (`TEXT[]`) en lugar de `simple-array`, que serializa el array como un string CSV (`"a,b,c"`) perdiendo el tipado nativo y generando bugs al buscar por trace IDs que contienen comas.
+La columna `relatedEventTraceIds` usa el tipo nativo de PostgreSQL (`TEXT[]`) en lugar de `simple-array`, que serializa el array como un string CSV (`"a,b,c"`) perdiendo el tipado nativo y generando bugs al buscar por trace IDs que contengan comas.
  
 ```typescript
-// Array nativo de PostgreSQL (TEXT[]) — tipado estricto y búsqueda segura
 @Column({ name: 'related_event_trace_ids', type: 'text', array: true, nullable: true })
 relatedEventTraceIds!: string[];
 ```
@@ -185,7 +181,6 @@ El DDL en `infra/init.sql` declara la columna de forma coherente: `related_event
 La defensa opera en dos capas. El DTO rechaza la petición con HTTP 400 antes de que llegue al repositorio:
  
 ```typescript
-// Rechaza con 400 si el cliente intenta pedir más de 100 registros
 @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(100) limit?: number = 20;
 ```
  
@@ -200,7 +195,7 @@ const limit = Math.min(Number(filters.limit ?? 20), 100);
  
 **Archivo:** `src/modules/alerts/infrastructure/queue/alert.worker.ts`
  
-El `AlertWorker` (clase `@Processor`) reside en `infrastructure/queue/`, no en `application/`. El motivo es que el Worker es un adaptador de entrada hacia BullMQ: conoce la API concreta de `bullmq` (`Job`, `WorkerHost`, `@Processor`), lo que lo convierte en un detalle de infraestructura. La capa de Application no debe importar frameworks externos; solo orquesta casos de uso a través de puertos abstractos. El Worker delega toda la lógica de negocio al caso de uso `CreateAlertUseCase`, que vive en `application/`.
+El `AlertWorker` reside en `infrastructure/queue/`, no en `application/`. El Worker es un adaptador de entrada hacia BullMQ: conoce la API concreta de `bullmq` (`Job`, `WorkerHost`, `@Processor`), lo que lo convierte en un detalle de infraestructura. La capa de Application no importa frameworks externos; solo orquesta casos de uso a través de puertos abstractos. El Worker delega toda la lógica de negocio al caso de uso `CreateAlertUseCase`, que vive en `application/`.
  
 ---
  
@@ -247,14 +242,14 @@ export const ALERT_QUEUE_NAME = 'alert-processing';
 export const ALERT_DLQ_NAME   = 'alert-processing-failed';
  
 export const defaultJobOptions: JobsOptions = {
-  attempts:  3,                                     // Hasta 3 intentos antes de DLQ
-  backoff:   { type: 'exponential', delay: 1000 },  // 1 s → 2 s → 4 s entre reintentos
-  removeOnComplete: { count: 100 },                 // Conserva los últimos 100 jobs exitosos
-  removeOnFail:     { count: 50  },                 // Conserva los últimos 50 fallidos
+  attempts:  3,
+  backoff:   { type: 'exponential', delay: 1000 },  // 1 s → 2 s → 4 s
+  removeOnComplete: { count: 100 },
+  removeOnFail:     { count: 50  },
 };
 ```
  
-Cuando un job agota sus 3 intentos (`job.attemptsMade >= attempts - 1`), el Worker lo reencola en la `ALERT_DLQ_NAME` con `removeOnComplete: false` para preservar el rastro de fallos sin pérdida de información.
+Cuando un job agota sus 3 intentos, el Worker lo reencola en `ALERT_DLQ_NAME` con `removeOnComplete: false` para conservar el rastro de fallos sin pérdida de información.
  
 ---
  
@@ -270,23 +265,20 @@ private readonly TTL_SECONDS = 30;
  
 async execute(): Promise<DashboardMetrics> {
  
-  // 1. Intentar leer desde caché (Redis DB0)
   const cached = await this.redis.get(this.CACHE_KEY);
   if (cached) {
     return JSON.parse(cached); // Cache HIT: respuesta ~1 ms
   }
  
-  // 2. Cache MISS: consulta paralela a las tres fuentes de datos
   const [openCount, resolvedCount, eventsByApp, eventsBySeverity, recentAlerts] =
     await Promise.all([
-      this.incidentRepo.countByStatus('OPEN'),     // PostgreSQL
-      this.incidentRepo.countByStatus('RESOLVED'), // PostgreSQL
-      this.eventRepo.groupByApplication(),          // MongoDB  $group
-      this.eventRepo.groupBySeverity(),             // MongoDB  $group
-      this.alertRepo.findRecent(10),                // MongoDB
+      this.incidentRepo.countByStatus('OPEN'),
+      this.incidentRepo.countByStatus('RESOLVED'),
+      this.eventRepo.groupByApplication(),
+      this.eventRepo.groupBySeverity(),
+      this.alertRepo.findRecent(10),
     ]);
  
-  // 3. Escribir en caché con TTL de 30 segundos
   await this.redis.set(this.CACHE_KEY, JSON.stringify(metrics), 'EX', this.TTL_SECONDS);
  
   return metrics;
@@ -297,23 +289,23 @@ async execute(): Promise<DashboardMetrics> {
  
 **Archivo:** `src/modules/shared/application/services/metrics-broadcast.service.ts`
  
-La invalidación no espera a que expire el TTL: cada mutación relevante (creación de alerta, cambio de estado de incidente) invoca `invalidateAndBroadcast()`, que elimina la clave de Redis y difunde las métricas frescas por WebSocket.
+La invalidación no espera a que expire el TTL: cada mutación relevante (creación de alerta, cambio de estado de incidente) llama a `invalidateAndBroadcast()`, que borra la clave de Redis y difunde las métricas frescas por WebSocket.
  
 ```typescript
 async invalidateAndBroadcast(): Promise<void> {
-  await this.redis.del('dashboard:metrics');            // Invalida caché activamente
-  const freshMetrics = await this.getMetrics.execute(); // Recalcula y re-cachea
-  this.gateway.emitMetricsUpdated(freshMetrics);        // WS: evento 'metrics.updated'
+  await this.redis.del('dashboard:metrics');
+  const freshMetrics = await this.getMetrics.execute();
+  this.gateway.emitMetricsUpdated(freshMetrics);
 }
 ```
  
 El `EventsGateway` (`src/modules/websockets/events.gateway.ts`) emite tres eventos Socket.IO distintos:
  
-| Evento WebSocket   | Cuándo se emite                            |
-|--------------------|--------------------------------------------|
-| `alert.created`    | Al procesar un job de alerta exitosamente  |
-| `incident.updated` | Al cambiar el estado de un incidente       |
-| `metrics.updated`  | Tras cada invalidación activa de caché     |
+| Evento WebSocket   | Cuándo se emite                           |
+|--------------------|-------------------------------------------|
+| `alert.created`    | Al procesar un job de alerta exitosamente |
+| `incident.updated` | Al cambiar el estado de un incidente      |
+| `metrics.updated`  | Tras cada invalidación activa de caché    |
  
 El Frontend (`src/hooks/useLiveMetrics.ts`) suscribe al evento `metrics.updated` y actualiza el `DashboardContext` sin polling.
  
@@ -330,13 +322,13 @@ La estrategia Passport JWT extrae el token del header `Authorization: Bearer <to
 - `POST /api/incidents`
 - `GET  /api/incidents/:id`
 - `PATCH /api/incidents/:id/status`
-Para desarrollo, el endpoint `POST /api/auth/token` genera un token sin credenciales (solo para evaluación).
+Para desarrollo, `POST /api/auth/token` genera un token sin credenciales (solo para evaluación).
  
 ### API Key — Autenticación de Sistemas Legacy
  
 **Archivo:** `src/modules/shared/guards/api-key.guard.ts`
  
-El guard `ApiKeyGuard` extrae el header `x-api-key` y lo compara contra la variable de entorno `LEGACY_API_KEY`. Protege exclusivamente `GET /api/incidents` (listado paginado), que es el único endpoint consumido por el script PHP. Esta separación permite revocar la API Key de sistemas externos sin afectar los tokens JWT de operadores humanos.
+`ApiKeyGuard` extrae el header `x-api-key` y lo compara contra la variable de entorno `LEGACY_API_KEY`. Protege exclusivamente `GET /api/incidents` (listado paginado), que es el único endpoint consumido por el script PHP. Esta separación permite revocar la API Key de sistemas externos sin afectar los tokens JWT de operadores internos.
  
 ```typescript
 canActivate(context: ExecutionContext): boolean {
@@ -359,7 +351,7 @@ ThrottlerModule.forRoot([{ ttl: 60000, limit: 100 }])
  
 Aplicado a todos los endpoints mediante `APP_GUARD`.
  
-**Configuración específica:** el endpoint `POST /api/events` eleva el umbral a **500 peticiones por minuto** con el decorador `@Throttle({ default: { ttl: 60000, limit: 500 } })`, dado que puede recibir ráfagas masivas desde múltiples sistemas externos simultáneamente.
+**Configuración específica:** `POST /api/events` eleva el umbral a **500 peticiones por minuto** con `@Throttle({ default: { ttl: 60000, limit: 500 } })`, dado que puede recibir ráfagas desde múltiples sistemas externos al mismo tiempo.
  
 ### `TraceIdInterceptor` — Trazabilidad End-to-End
  
@@ -370,13 +362,13 @@ Aplicado globalmente en `main.ts`, el interceptor opera en cada request:
 1. Lee el header `x-trace-id` enviado por el cliente (o genera un UUID v4 si no existe).
 2. Inyecta el valor en `request.traceId` para que los casos de uso lo propaguen a las entidades de dominio y los logs.
 3. Reenvía el mismo `x-trace-id` en el header de la respuesta.
-Esto permite rastrear el recorrido completo de un evento —desde el sistema externo que lo emitió hasta la alerta generada en MongoDB— usando un único identificador en todos los logs estructurados JSON.
+Esto permite rastrear el recorrido completo de un evento —desde el sistema externo que lo emitió hasta la alerta generada en MongoDB— con un único identificador en todos los logs estructurados JSON.
  
 ### Health Check Personalizado
  
 **Archivo:** `src/modules/health/health.controller.ts`
  
-El endpoint `GET /health` realiza ping activo a las tres dependencias críticas de forma independiente. El check de Redis no usa `@nestjs/terminus` nativo, sino una llamada directa `this.redis.ping()` al cliente `REDIS_CACHE` (DB0):
+`GET /health` hace ping activo a las tres dependencias críticas de forma independiente. El check de Redis no usa `@nestjs/terminus` nativo sino una llamada directa `this.redis.ping()` al cliente `REDIS_CACHE` (DB0):
  
 ```typescript
 async () => {
@@ -441,9 +433,7 @@ Respuesta: `201 { "traceId": "b3a2f1e0-..." }`
 **`PATCH /api/incidents/:id/status`** *(requiere `Authorization: Bearer <token>`)*
  
 ```json
-{
-  "status": "IN_PROGRESS"
-}
+{ "status": "IN_PROGRESS" }
 ```
  
 Transiciones válidas:
@@ -476,7 +466,7 @@ OPEN  →  IN_PROGRESS  →  RESOLVED
  
 **Archivo:** `legacy/legacy-client.php`
  
-El script PHP implementa la integración con la nueva plataforma sin depender de frameworks: usa solo extensiones estándar disponibles en cualquier instalación PHP 7.4+.
+El script PHP integra la nueva plataforma sin depender de frameworks: usa solo extensiones estándar disponibles en cualquier instalación PHP 7.4+.
  
 ### Mecanismo de Autenticación
  
@@ -515,7 +505,7 @@ $incidentes = array_map(function ($incidente) {
 }, $body['data']);
 ```
  
-La salida incluye metadatos de paginación (`pagina_actual`, `total_paginas`, `total_registros`) y el resumen total de incidentes abiertos encontrados en la página consultada.
+La salida incluye metadatos de paginación (`pagina_actual`, `total_paginas`, `total_registros`) y un resumen del total de incidentes abiertos encontrados en la página consultada.
  
 ---
  
@@ -559,10 +549,12 @@ plataforma-monitoreo/                       ←  Carpeta raíz del workspace uni
 │           │           └── bullmq.config.ts       ←  defaultJobOptions
 │           │
 │           ├── dashboard/
+│           │   ├── dashboard.module.ts
 │           │   ├── application/use-cases/get-dashboard-metrics.use-case.ts
 │           │   └── presentation/controllers/dashboard.controller.ts
 │           │
 │           ├── events/
+│           │   ├── events.module.ts
 │           │   ├── application/
 │           │   │   ├── dtos/register-event.dto.ts
 │           │   │   └── use-cases/
@@ -572,19 +564,28 @@ plataforma-monitoreo/                       ←  Carpeta raíz del workspace uni
 │           │   │   ├── entities/event.entity.ts
 │           │   │   ├── enums/event-severity.enum.ts
 │           │   │   └── repositories/i-event.repository.ts
-│           │   ├── infrastructure/persistence/mongo-event.repository.ts
+│           │   ├── infrastructure/persistence/
+│           │   │   ├── mongo-event.repository.ts
+│           │   │   └── schemas/event.schema.ts
 │           │   └── presentation/controllers/event.controller.ts
 │           │
 │           ├── health/
+│           │   ├── health.module.ts
 │           │   └── health.controller.ts           ←  Ping activo a Redis, PG, Mongo
 │           │
 │           ├── incidents/
+│           │   ├── incidents.module.ts
 │           │   ├── application/
 │           │   │   ├── dtos/
+│           │   │   │   ├── create-incident.dto.ts
+│           │   │   │   ├── incident-filters.dto.ts
+│           │   │   │   └── update-status.dto.ts
 │           │   │   └── use-cases/
 │           │   │       ├── create-incident.use-case.ts
 │           │   │       ├── update-incident-status.use-case.ts
 │           │   │       └── __tests__/
+│           │   │           ├── create-incident.use-case.integration.spec.ts
+│           │   │           └── update-incident-status.use-case.integration.spec.ts
 │           │   ├── domain/
 │           │   │   ├── entities/
 │           │   │   │   ├── incident.entity.ts
@@ -601,8 +602,8 @@ plataforma-monitoreo/                       ←  Carpeta raíz del workspace uni
 │           │   └── presentation/controllers/incident.controller.ts
 │           │
 │           ├── shared/
-│           │   ├── application/services/metrics-broadcast.service.ts
 │           │   ├── auth.module.ts
+│           │   ├── application/services/metrics-broadcast.service.ts
 │           │   ├── filters/global-exception.filter.ts
 │           │   ├── guards/
 │           │   │   ├── api-key.guard.ts
@@ -613,6 +614,7 @@ plataforma-monitoreo/                       ←  Carpeta raíz del workspace uni
 │           │   └── presentation/auth.controller.ts
 │           │
 │           └── websockets/
+│               ├── websockets.module.ts
 │               └── events.gateway.ts             ←  emit: alert.created / metrics.updated
 │
 └── frontend/                               ←  Repositorio Frontend  (React 19 + Vite)
@@ -620,19 +622,25 @@ plataforma-monitoreo/                       ←  Carpeta raíz del workspace uni
     ├── index.html
     └── src/
         ├── App.tsx
+        ├── __tests__/
+        │   └── Dashboard.test.tsx
         ├── components/
         │   ├── EventForm.tsx
         │   ├── IncidentFilters.tsx
         │   ├── IncidentForm.tsx
         │   ├── IncidentTable.tsx
         │   ├── SocketsConsole.tsx
-        │   └── SummaryWidgets.tsx
+        │   ├── SummaryWidgets.tsx
+        │   └── Toast.tsx
         ├── context/DashboardContext.tsx
-        ├── hooks/useLiveMetrics.ts          ←  Socket.IO: suscribe a 'metrics.updated'
+        ├── hooks/
+        │   ├── useLiveMetrics.ts          ←  Socket.IO: suscribe a 'metrics.updated'
+        │   └── useToast.ts
         ├── pages/Dashboard.tsx
         └── shared/
             ├── api.ts
-            └── types.ts
+            ├── types.ts
+            └── utils.ts
 ```
  
 ---
@@ -641,7 +649,7 @@ plataforma-monitoreo/                       ←  Carpeta raíz del workspace uni
  
 ### Estrategia de Workspace Unificado
  
-Los repositorios de Backend y Frontend son **repositorios GitHub independientes**. Sin embargo, el `docker-compose.yml` del backend referencia la carpeta del frontend con la ruta relativa `../frontend` (servicio `frontend`). Por esto, se deben clonar de forma **paralela dentro de una misma carpeta raíz** respetando los nombres de directorio exactos.
+Los repositorios de Backend y Frontend son **repositorios GitHub independientes**. Sin embargo, el `docker-compose.yml` del backend referencia la carpeta del frontend con la ruta relativa `../frontend` (servicio `frontend`). Por esto, hay que clonarlos de forma **paralela dentro de una misma carpeta raíz** respetando los nombres de directorio exactos.
  
 ```bash
 # 1. Crear y acceder al espacio de trabajo unificado
@@ -673,7 +681,7 @@ plataforma-monitoreo/
 # Desde la carpeta backend/
 cd backend
  
-# Copiar y revisar el archivo de entorno (los valores por defecto ya funcionan)
+# Copiar el archivo de entorno (los valores por defecto ya funcionan)
 cp .env.example .env.development
  
 # Levantar todos los servicios: postgres, mongo, redis, api, frontend, php-legacy
@@ -686,15 +694,15 @@ docker compose logs -f frontend
  
 Los servicios quedan disponibles en:
  
-| Servicio            | URL                                      |
-|---------------------|------------------------------------------|
-| API REST            | `http://localhost:3000/api`              |
-| Swagger UI          | `http://localhost:3000/api/docs`         |
-| Frontend Dashboard  | `http://localhost:5173`                  |
-| Health Check        | `http://localhost:3000/health`           |
-| PostgreSQL          | `localhost:5432` (user: admin / secret)  |
-| MongoDB             | `localhost:27017`                        |
-| Redis               | `localhost:6379`                         |
+| Servicio           | URL                                     |
+|--------------------|-----------------------------------------|
+| API REST           | `http://localhost:3000/api`             |
+| Swagger UI         | `http://localhost:3000/api/docs`        |
+| Frontend Dashboard | `http://localhost:5173`                 |
+| Health Check       | `http://localhost:3000/health`          |
+| PostgreSQL         | `localhost:5432` (user: admin / secret) |
+| MongoDB            | `localhost:27017`                       |
+| Redis              | `localhost:6379`                        |
  
 ### Opción B — Backend en modo desarrollo *(hot-reload)*
  
@@ -708,7 +716,7 @@ npm install
 npm run start:dev
 ```
  
-> Asegurarse de que `.env.development` tenga `POSTGRES_HOST=localhost`, `MONGO_URI=mongodb://localhost:27017/events_db` y `REDIS_HOST=localhost` *(ya es el valor por defecto del `.env.example`)*.
+> Asegurarse de que `.env.development` tenga `POSTGRES_HOST=localhost`, `MONGO_URI=mongodb://localhost:27017/events_db` y `REDIS_HOST=localhost` (ya es el valor por defecto del `.env.example`).
  
 ### Opción C — Frontend en modo desarrollo
  
@@ -749,7 +757,7 @@ Usar el token en Swagger UI: botón **Authorize** → campo `JWT` → pegar el `
 ```bash
 cd backend
  
-# Pruebas unitarias y de integración (toda la suite Jest)
+# Suite completa Jest
 npm run test
  
 # Modo watch
@@ -758,7 +766,7 @@ npm run test:watch
 # Cobertura completa
 npm run test:cov
  
-# Pruebas end-to-end (jest-e2e.json)
+# Pruebas end-to-end
 npm run test:e2e
 ```
  
@@ -769,30 +777,30 @@ npm run test   # Vitest + Testing Library
  
 ### Variables de Entorno de Referencia
  
-| Variable           | Descripción                                              | Valor por defecto (dev)               |
-|--------------------|----------------------------------------------------------|---------------------------------------|
-| `NODE_ENV`         | Entorno de ejecución                                     | `development`                         |
-| `PORT`             | Puerto de la API                                         | `3000`                                |
-| `POSTGRES_HOST`    | Host de PostgreSQL (`localhost` o `postgres` en Docker)  | `localhost`                           |
-| `POSTGRES_PORT`    | Puerto PostgreSQL                                        | `5432`                                |
-| `POSTGRES_DB`      | Nombre de la base de datos                               | `incidents_db`                        |
-| `POSTGRES_USER`    | Usuario PostgreSQL                                       | `admin`                               |
-| `POSTGRES_PASSWORD`| Contraseña PostgreSQL                                    | `secret`                              |
-| `MONGO_URI`        | URI de conexión MongoDB                                  | `mongodb://localhost:27017/events_db` |
-| `REDIS_HOST`       | Host de Redis                                            | `localhost`                           |
-| `REDIS_PORT`       | Puerto Redis                                             | `6379`                                |
-| `REDIS_CACHE_DB`   | Base de datos Redis para caché (Cache Aside)             | `0`                                   |
-| `REDIS_QUEUE_DB`   | Base de datos Redis para BullMQ                          | `1`                                   |
-| `JWT_SECRET`       | Secreto de firma JWT                                     | `incidentes-coordinadora-jwt-dev-2026`|
-| `LEGACY_API_KEY`   | API Key para el script PHP Legacy                        | `legacy-php-dev-key-2026`             |
-| `VITE_API_URL`     | URL del backend (leída por el Frontend Vite)             | `http://localhost:3000`               |
-| `VITE_WS_URL`      | URL WebSocket (leída por el Frontend Vite)               | `ws://localhost:3000`                 |
+| Variable            | Descripción                                             | Valor por defecto (dev)               |
+|---------------------|---------------------------------------------------------|---------------------------------------|
+| `NODE_ENV`          | Entorno de ejecución                                    | `development`                         |
+| `PORT`              | Puerto de la API                                        | `3000`                                |
+| `POSTGRES_HOST`     | Host de PostgreSQL (`localhost` o `postgres` en Docker) | `localhost`                           |
+| `POSTGRES_PORT`     | Puerto PostgreSQL                                       | `5432`                                |
+| `POSTGRES_DB`       | Nombre de la base de datos                              | `incidents_db`                        |
+| `POSTGRES_USER`     | Usuario PostgreSQL                                      | `admin`                               |
+| `POSTGRES_PASSWORD` | Contraseña PostgreSQL                                   | `secret`                              |
+| `MONGO_URI`         | URI de conexión MongoDB                                 | `mongodb://localhost:27017/events_db` |
+| `REDIS_HOST`        | Host de Redis                                           | `localhost`                           |
+| `REDIS_PORT`        | Puerto Redis                                            | `6379`                                |
+| `REDIS_CACHE_DB`    | Base de datos Redis para caché (Cache Aside)            | `0`                                   |
+| `REDIS_QUEUE_DB`    | Base de datos Redis para BullMQ                         | `1`                                   |
+| `JWT_SECRET`        | Secreto de firma JWT                                    | `incidentes-coordinadora-jwt-dev-2026`|
+| `LEGACY_API_KEY`    | API Key para el script PHP Legacy                       | `legacy-php-dev-key-2026`             |
+| `VITE_API_URL`      | URL del backend (leída por el Frontend Vite)            | `http://localhost:3000`               |
+| `VITE_WS_URL`       | URL WebSocket (leída por el Frontend Vite)              | `ws://localhost:3000`                 |
+ 
+---
  
 ### 10.5 Plan de Verificación Funcional (Paso a Paso)
  
-> Ejecute este flujo **una sola vez**, con el stack de Docker completamente levantado (`docker compose up --build`), para validar de extremo a extremo la integración de todos los componentes: ingesta asíncrona, consistencia ACID, WebSockets en tiempo real e interoperabilidad con el sistema legacy.
- 
----
+> Ejecuta este flujo **una sola vez**, con el stack de Docker completamente levantado (`docker compose up --build`), para validar de extremo a extremo la integración de todos los componentes: ingesta asíncrona, consistencia ACID, WebSockets en tiempo real e interoperabilidad con el sistema legacy.
  
 #### Paso 1 — Ingesta de Evento Crítico y Activación de la Cola Asíncrona
  
@@ -825,7 +833,7 @@ EVENT_REGISTERED  →  ALERT_QUEUED  →  ALERT_PROCESSING_STARTED  →  ALERT_P
  
 **Resultado esperado — Dashboard React** (`http://localhost:5173`):
  
-El widget de alertas añade la nueva fila en tiempo real y los gráficos de métricas se incrementan de forma reactiva al recibir el evento WebSocket `metrics.updated`, sin necesidad de recargar la página.
+El widget de alertas añade la nueva fila en tiempo real y los gráficos de métricas se actualizan al recibir el evento WebSocket `metrics.updated`, sin necesidad de recargar la página.
  
 > **Guarda el `traceId` de la respuesta** — lo necesitarás en el Paso 2.
  
@@ -860,56 +868,52 @@ curl -X POST http://localhost:3000/api/incidents \
  
 Dentro de la misma transacción atómica (QueryRunner), se crean de forma simultánea:
  
-| Tabla              | Registro creado                                  |
-|--------------------|--------------------------------------------------|
-| `incidents`        | Incidente con `status = OPEN`                    |
-| `incident_audit`   | Entrada inmutable con transición `OPEN → OPEN`   |
+| Tabla            | Registro creado                                |
+|------------------|------------------------------------------------|
+| `incidents`      | Incidente con `status = OPEN`                  |
+| `incident_audit` | Entrada inmutable con transición `OPEN → OPEN` |
  
 Si el guardado de la auditoría falla, el incidente se revierte automáticamente; nunca quedan registros huérfanos.
  
 **Resultado esperado — Dashboard React:**
  
-El contador de incidentes abiertos del widget de resumen incrementa en `+1` de forma reactiva vía WebSocket `metrics.updated`, sin recargar la página.
+El contador de incidentes abiertos incrementa en `+1` de forma reactiva vía WebSocket `metrics.updated`, sin recargar la página.
  
 ---
  
 #### Paso 3 — Transición de Estado y Máquina de Estados del Dominio
  
-Avanza el incidente creado a través de su ciclo de vida:
- 
 ```bash
 # OPEN → IN_PROGRESS
-curl -X PATCH http://localhost:3000/api/incidents/<ID_DEL_INCIDENTE>/status \
+curl -X PATCH http://localhost:3000/api/incidents/<ID>/status \
   -H "Authorization: Bearer <TU_ACCESS_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{ "status": "IN_PROGRESS" }'
  
 # IN_PROGRESS → RESOLVED
-curl -X PATCH http://localhost:3000/api/incidents/<ID_DEL_INCIDENTE>/status \
+curl -X PATCH http://localhost:3000/api/incidents/<ID>/status \
   -H "Authorization: Bearer <TU_ACCESS_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{ "status": "RESOLVED" }'
 ```
  
-Para verificar que la máquina de estados rechaza transiciones inválidas, intenta saltar estados:
+Para verificar que la máquina de estados rechaza transiciones inválidas:
  
 ```bash
 # Intentar RESOLVED → OPEN (debe fallar)
-curl -X PATCH http://localhost:3000/api/incidents/<ID_DEL_INCIDENTE>/status \
+curl -X PATCH http://localhost:3000/api/incidents/<ID>/status \
   -H "Authorization: Bearer <TU_ACCESS_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{ "status": "OPEN" }'
 ```
  
-**Resultado esperado en transiciones válidas:** `200 OK` con el incidente actualizado y una nueva entrada en `incident_audit` registrando cada cambio de estado con su actor y `traceId`.
+**Transiciones válidas:** `200 OK` con el incidente actualizado y una nueva entrada en `incident_audit` registrando el cambio de estado con su actor y `traceId`.
  
-**Resultado esperado en transición inválida:** `409 Conflict` con mensaje descriptivo — ningún registro se escribe en base de datos.
+**Transición inválida:** `409 Conflict` con mensaje descriptivo — ningún registro se escribe en base de datos.
  
 ---
  
 #### Paso 4 — Consumo del Sistema Legacy PHP e Interoperabilidad
- 
-Ejecuta el contenedor PHP para verificar la integración con autenticación por API Key y paginación controlada:
  
 ```bash
 docker compose run --rm php-legacy
@@ -919,9 +923,9 @@ docker compose run --rm php-legacy
  
 ```json
 {
-  "pagina_actual":    1,
-  "total_paginas":    1,
-  "total_registros":  1,
+  "pagina_actual":   1,
+  "total_paginas":   1,
+  "total_registros": 1,
   "incidentes": [
     {
       "id":         "uuid-del-incidente",
@@ -966,7 +970,7 @@ El script adjunta automáticamente el header `x-api-key` a cada petición. Si la
  
 ## 11. Cobertura de Pruebas Unitarias y de Integración
  
-La suite de pruebas del backend usa **Jest** y vive junto al código que prueba (`__tests__/` o sufijo `.spec.ts`), siguiendo la misma estructura por capas de DDD. En total, **29 pruebas automatizadas** validan el dominio y los casos de uso críticos del negocio.
+La suite del backend usa **Jest** y vive junto al código que prueba (`__tests__/` o sufijo `.spec.ts`), siguiendo la misma estructura por capas de DDD. En total, **29 pruebas automatizadas** validan el dominio y los casos de uso críticos del negocio.
  
 ### 11.1 Backend — Pruebas Unitarias
  
@@ -1028,31 +1032,26 @@ La suite de pruebas del backend usa **Jest** y vive junto al código que prueba 
  
 ### 11.3 Resumen de Cobertura
  
-| Capa / módulo                        | Tipo        | # Pruebas |
-|--------------------------------------|-------------|:---------:|
-| `IncidentStatus` (Value Object)      | Unitaria    | 6         |
-| `AppController` (bootstrap)          | Unitaria    | 1         |
-| `CreateIncidentUseCase`              | Integración | 10        |
-| `UpdateIncidentStatusUseCase`        | Integración | 11        |
-| `RegisterEventUseCase`               | Integración | 1         |
-| **Total backend**                    |             | **29**    |
+| Capa / módulo                   | Tipo        | # Pruebas |
+|---------------------------------|-------------|:---------:|
+| `IncidentStatus` (Value Object) | Unitaria    | 6         |
+| `AppController` (bootstrap)     | Unitaria    | 1         |
+| `CreateIncidentUseCase`         | Integración | 10        |
+| `UpdateIncidentStatusUseCase`   | Integración | 11        |
+| `RegisterEventUseCase`          | Integración | 1         |
+| **Total backend**               |             | **29**    |
  
 Comandos de referencia: `npm run test` · `npm run test:cov` · `npm run test:e2e`
  
-> **Frontend:** el repositorio `frontend/` incluye su propia suite con **Vitest + Testing Library** (`npm run test`), con pruebas unitarias del reducer de estado global (`DashboardContext`) y pruebas de integración del flujo de envío de formularios (`EventForm` / `IncidentForm`), introducidas en la rama `feature/automated-tests` (ver [§12.3](#123-frontend--frontend-incident-platform)).
+> **Frontend:** el repositorio `frontend/` tiene su propia suite con **Vitest + Testing Library** (`npm run test`). Cubre pruebas unitarias del reducer (`dashboardReducer`), pruebas de integración de los componentes de presentación (`SummaryWidgets`, `IncidentTable`) y pruebas de integración de los formularios (`EventForm`, `IncidentForm`). Introducida en las ramas `feature/automated-tests` y `feature/automated-tests-and-docker` (ver [§12.3](#123-frontend--frontend-incident-platform)).
  
 ---
  
 ## 12. Flujo de Trabajo Git y Estrategia de Ramas
  
-> La información de esta sección **no es descriptiva ni inventada**: se obtuvo ejecutando directamente los siguientes comandos en **Git Bash**, sobre cada repositorio:
+> La información de esta sección se obtuvo ejecutando directamente los siguientes comandos en **Git Bash**, sobre cada repositorio:
 >
 > ```bash
-> # Ejecutado en  c/Proyectos/backend-incident-platform  (rama main)
-> git log --oneline --graph --all
-> git reflog --all
->
-> # Ejecutado en  c/Proyectos/frontend-incident-platform  (rama main)
 > git log --oneline --graph --all
 > git reflog --all
 > ```
@@ -1109,7 +1108,7 @@ develop   ●── dccdddc (origin/develop, develop)
 2. La automatización de pruebas (`feature/automated-tests`) y el setup de Docker (`feature/docker-setup`) se integran primero a `develop`.
 3. Le siguen las ramas de pruebas por capa: `feature/domain-testing` ([§11.1](#111-backend--pruebas-unitarias)) y `feature/integration-testing` ([§11.2](#112-backend--pruebas-de-integración)).
 4. `feature/app-config-legacy` consolida los providers globales y el cliente PHP legacy (HU5).
-5. `develop` se promueve a `main` mediante un merge commit de release.
+5. `develop` se promueve a `main` con un merge commit de release.
 6. `feature/docs` documenta la arquitectura y se re-integra varias veces antes del cierre.
 7. Estado final: `main` y `origin/main` apuntan al mismo commit (`857cf07`).
 ### 12.3 Frontend — `frontend-incident-platform`
@@ -1135,10 +1134,14 @@ develop   ◄── branch: Created from HEAD (main)
           │     └─ test: add unit tests for state reducer and integration tests for form submission
           │   ──► merge → develop
           │
+          ├─ feature/automated-tests-and-docker
+          │     └─ test: config vitest script in package.json and add container files
+          │   ──► merge → develop
+          │
 develop ──┴──► merge → main   (release: production ready react dashboard v1.0.0)
           │
-main      ●── 8ddeaeb (HEAD -> main, origin/main)
-develop   ●── 08391cd (origin/develop, develop)
+main      ●── 708a419 (HEAD -> main, origin/main)
+develop   ●── 2a1a8da (origin/develop, develop)
 ```
  
 **Lectura del flujo:**
@@ -1147,43 +1150,40 @@ develop   ●── 08391cd (origin/develop, develop)
 2. `feature/context-api` define los tipos de dominio y el reducer global (`DashboardContext`).
 3. `feature/live-hooks` construye el cliente HTTP con resolución automática de token y el hook de Socket.IO (`useLiveMetrics`).
 4. `feature/presentation-components` arma la capa de presentación modular.
-5. `feature/automated-tests` añade las pruebas unitarias del reducer y las pruebas de integración de formularios.
-6. `develop` se promueve a `main` con un único merge commit de release.
-7. Estado final: `main` y `origin/main` coinciden en `8ddeaeb`.
+5. `feature/automated-tests` añade las pruebas unitarias del reducer y las pruebas de integración de los formularios.
+6. `feature/automated-tests-and-docker` configura el script de Vitest en `package.json` y añade los archivos de contenedor.
+7. `develop` se promueve a `main` con un merge commit de release.
+8. Estado final: `main` y `origin/main` coinciden en `708a419`.
 ### 12.4 Convención de mensajes de commit
  
 Ambos repositorios siguen consistentemente el estilo **Conventional Commits**:
  
-| Prefijo    | Uso observado                                                       |
-|------------|---------------------------------------------------------------------|
-| `chore:`   | Configuración inicial del proyecto (Nest CLI, Vite, Tailwind)       |
-| `feat:`    | Nueva funcionalidad (providers, hooks, componentes, dominio)        |
-| `test:`    | Adición de pruebas unitarias/integración                            |
-| `docs:`    | Documentación de arquitectura (README)                              |
-| `merge:`   | Integración de una rama `feature/*` hacia `develop`                 |
-| `release:` | Promoción de `develop` a `main`, marca de versión desplegable       |
+| Prefijo    | Uso observado                                                 |
+|------------|---------------------------------------------------------------|
+| `chore:`   | Configuración inicial del proyecto (Nest CLI, Vite, Tailwind) |
+| `feat:`    | Nueva funcionalidad (providers, hooks, componentes, dominio)  |
+| `test:`    | Adición de pruebas unitarias/integración                      |
+| `docs:`    | Documentación de arquitectura (README)                        |
+| `merge:`   | Integración de una rama `feature/*` hacia `develop`           |
+| `release:` | Promoción de `develop` a `main`, marca de versión desplegable |
  
 ---
  
 ## 13. Mapeo a Criterios de Evaluación
  
-| Criterio                                                  | Dónde se evidencia                                                                             |
-|-----------------------------------------------------------|------------------------------------------------------------------------------------------------|
-| Aplicación correcta de Domain Driven Design               | [§2](#2-arquitectura-de-software--ddd-puro) — capas, VO `IncidentStatus`                       |
-| Uso adecuado de NestJS/TypeScript                         | [§2](#2-arquitectura-de-software--ddd-puro), [§3](#3-decisiones-de-ingeniería), [§6](#6-seguridad-resiliencia-y-transversales) |
-| Correcta separación de contextos y capas                  | [§2](#2-arquitectura-de-software--ddd-puro), [§9](#9-estructura-del-proyecto)                  |
-| Diseño de APIs REST                                       | [§7](#7-contratos-de-la-api--paginación)                                                       |
-| Uso adecuado de PostgreSQL y NoSQL según el dominio       | [§1](#1-vista-general-y-justificación-tecnológica) — justificación PostgreSQL vs. MongoDB      |
-| Correcta implementación de Redis                          | [§1](#1-vista-general-y-justificación-tecnológica), [§5](#5-estrategia-de-caché-e-invalidación-activa-hu4) |
-| Diseño de procesamiento asíncrono desacoplado             | [§4](#4-procesamiento-asíncrono-de-alertas-hu3)                                                |
-| Capacidad de escalar la solución                          | [§1](#1-vista-general-y-justificación-tecnológica), [§6](#6-seguridad-resiliencia-y-transversales) |
-| Calidad del frontend y experiencia de usuario             | [§9](#9-estructura-del-proyecto), [§5](#5-estrategia-de-caché-e-invalidación-activa-hu4)       |
-| Integración del componente PHP legacy                     | [§8](#8-integración-con-el-sistema-legacy-hu5)                                                 |
-| **Cobertura de pruebas unitarias y de integración**       | **[§11](#11-cobertura-de-pruebas-unitarias-y-de-integración)**                                 |
-| **Uso adecuado de Git y flujo de ramas**                  | **[§12](#12-flujo-de-trabajo-git-y-estrategia-de-ramas)**                                      |
+| Criterio                                            | Dónde se evidencia                                                                      |
+|-----------------------------------------------------|-----------------------------------------------------------------------------------------|
+| Aplicación correcta de Domain Driven Design         | [§2](#2-arquitectura-de-software--ddd-puro) — capas, VO `IncidentStatus`                |
+| Uso adecuado de NestJS/TypeScript                   | [§2](#2-arquitectura-de-software--ddd-puro), [§3](#3-decisiones-de-ingeniería), [§6](#6-seguridad-resiliencia-y-transversales) |
+| Correcta separación de contextos y capas            | [§2](#2-arquitectura-de-software--ddd-puro), [§9](#9-estructura-del-proyecto)           |
+| Diseño de APIs REST                                 | [§7](#7-contratos-de-la-api--paginación)                                                |
+| Uso adecuado de PostgreSQL y NoSQL según el dominio | [§1](#1-vista-general-y-justificación-tecnológica) — justificación PostgreSQL vs MongoDB |
+| Correcta implementación de Redis                    | [§1](#1-vista-general-y-justificación-tecnológica), [§5](#5-estrategia-de-caché-e-invalidación-activa-hu4) |
+| Diseño de procesamiento asíncrono desacoplado       | [§4](#4-procesamiento-asíncrono-de-alertas-hu3)                                         |
+| Capacidad de escalar la solución                    | [§1](#1-vista-general-y-justificación-tecnológica), [§6](#6-seguridad-resiliencia-y-transversales) |
+| Calidad del frontend y experiencia de usuario       | [§9](#9-estructura-del-proyecto), [§5](#5-estrategia-de-caché-e-invalidación-activa-hu4) |
+| Integración del componente PHP legacy               | [§8](#8-integración-con-el-sistema-legacy-hu5)                                          |
+| Cobertura de pruebas unitarias y de integración     | [§11](#11-cobertura-de-pruebas-unitarias-y-de-integración)                              |
+| Uso adecuado de Git y flujo de ramas                | [§12](#12-flujo-de-trabajo-git-y-estrategia-de-ramas)                                   |
  
 ---
- 
-<div align="center">
-  <sub>Documento técnico — Plataforma de Monitoreo Operacional · Junio 2026</sub>
-</div>
