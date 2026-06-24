@@ -3,10 +3,9 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { MongooseModule } from '@nestjs/mongoose';
 import { BullModule } from '@nestjs/bullmq';
-import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler'; 
-import { APP_GUARD } from '@nestjs/core'; 
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { APP_GUARD } from '@nestjs/core';
 import * as Joi from 'joi';
-
 import { RedisModule } from './modules/shared/infrastructure/redis/redis.module';
 import { WebsocketsModule } from './modules/websockets/websockets.module';
 import { AuthModule } from './modules/shared/auth.module';
@@ -38,7 +37,6 @@ import { HealthModule } from './modules/health/health.module';
         LEGACY_API_KEY: Joi.string().required(),
       }),
     }),
-
     TypeOrmModule.forRootAsync({
       useFactory: (config: ConfigService) => ({
         type: 'postgres',
@@ -52,14 +50,12 @@ import { HealthModule } from './modules/health/health.module';
       }),
       inject: [ConfigService],
     }),
-
     MongooseModule.forRootAsync({
       useFactory: (config: ConfigService) => ({
         uri: config.get<string>('MONGO_URI'),
       }),
       inject: [ConfigService],
     }),
-
     BullModule.forRootAsync({
       useFactory: (config: ConfigService) => ({
         connection: {
@@ -71,12 +67,10 @@ import { HealthModule } from './modules/health/health.module';
       }),
       inject: [ConfigService],
     }),
-
     ThrottlerModule.forRoot([{
       ttl: 60000,
       limit: 100,
     }]),
-
     RedisModule,
     WebsocketsModule,
     AuthModule,
@@ -88,7 +82,7 @@ import { HealthModule } from './modules/health/health.module';
   ],
   providers: [
     {
-      provide: APP_GUARD, 
+      provide: APP_GUARD,
       useClass: ThrottlerGuard,
     },
   ],

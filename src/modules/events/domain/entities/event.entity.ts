@@ -1,6 +1,6 @@
 export class Event {
   constructor(
-    public readonly id: string | null, 
+    public readonly id: string | null,
     public readonly traceId: string,
     public readonly application: string,
     public readonly eventType: string,

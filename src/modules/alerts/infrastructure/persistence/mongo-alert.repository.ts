@@ -14,11 +14,11 @@ export class MongoAlertRepository implements IAlertRepository {
 
   async save(alert: Alert): Promise<Alert> {
     const doc = await this.model.create({
-      sourceTraceId: alert.sourceTraceId,
+      sourceTraceId:       alert.sourceTraceId,
       affectedApplication: alert.affectedApplication,
-      severity: alert.severity,
-      generatedAt: alert.generatedAt,
-      processingStatus: alert.processingStatus,
+      severity:            alert.severity,
+      generatedAt:         alert.generatedAt,
+      processingStatus:    alert.processingStatus,
     });
     return this.toDomain(doc);
   }

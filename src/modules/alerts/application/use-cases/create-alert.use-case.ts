@@ -3,9 +3,9 @@ import { Alert } from '../../domain/entities/alert.entity';
 import type { IAlertRepository } from '../../domain/repositories/i-alert.repository';
 
 export interface CreateAlertDto {
-  sourceTraceId: string;
+  sourceTraceId:       string;
   affectedApplication: string;
-  severity: string;
+  severity:            string;
 }
 
 @Injectable()
@@ -24,7 +24,6 @@ export class CreateAlertUseCase {
       new Date(),
       'PROCESSED',
     );
-
     return this.alertRepo.save(alert);
   }
 }

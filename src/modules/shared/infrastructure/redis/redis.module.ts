@@ -7,13 +7,11 @@ import Redis from 'ioredis';
   providers: [
     {
       provide: 'REDIS_CACHE',
-      useFactory: (config: ConfigService) => {
-        return new Redis({
-          host: config.get<string>('REDIS_HOST'),
-          port: config.get<number>('REDIS_PORT'),
-          db: config.get<number>('REDIS_CACHE_DB', 0),
-        });
-      },
+      useFactory: (config: ConfigService) => new Redis({
+        host: config.get<string>('REDIS_HOST'),
+        port: config.get<number>('REDIS_PORT'),
+        db:   config.get<number>('REDIS_CACHE_DB', 0),
+      }),
       inject: [ConfigService],
     },
   ],

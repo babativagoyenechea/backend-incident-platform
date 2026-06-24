@@ -15,7 +15,7 @@ export class CreateIncidentUseCase {
 
   async execute(dto: CreateIncidentDto, traceId: string): Promise<Incident> {
     const incident = new Incident(
-      '', // Postgres generará el UUID automáticamente
+      '',
       dto.title,
       dto.description || '',
       dto.affectedApplication,
@@ -27,11 +27,14 @@ export class CreateIncidentUseCase {
       new Date(),
     );
 
+    // Auditoría inicial: tanto oldStatus como newStatus son OPEN porque
+    // el incidente nace directamente en ese estado.
     const audit = new IncidentAudit('', 'OPEN', 'OPEN', 'SYSTEM', traceId);
     const saved = await this.incidentRepo.saveWithAudit(incident, audit);
 
-    // Invalida el caché de Redis DB0 y emite "metrics.updated" por WebSockets (Decisión 7)
+    // Invalida la caché Redis y emite el evento metrics.updated por WebSocket
     await this.metricsBroadcast.invalidateAndBroadcast();
+
     return saved;
   }
 }

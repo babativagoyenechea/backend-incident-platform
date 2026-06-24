@@ -28,16 +28,20 @@ export class RegisterEventUseCase {
     );
 
     const savedEvent = await this.eventRepo.save(event);
-    this.logger.log(JSON.stringify({ action: 'EVENT_REGISTERED', traceId, severity: savedEvent.severity }));
+    this.logger.log(JSON.stringify({
+      action:   'EVENT_REGISTERED',
+      traceId,
+      severity: savedEvent.severity,
+    }));
 
+    // Solo los eventos CRITICAL disparan el procesamiento de alertas en background
     if (savedEvent.severity === 'CRITICAL') {
       await this.alertQueue.add('process-alert', {
-        eventId: savedEvent.id,
-        traceId: savedEvent.traceId,
-        severity: savedEvent.severity,
+        eventId:     savedEvent.id,
+        traceId:     savedEvent.traceId,
+        severity:    savedEvent.severity,
         application: savedEvent.application,
       }, defaultJobOptions);
-
       this.logger.log(JSON.stringify({ action: 'ALERT_QUEUED', traceId }));
     }
 

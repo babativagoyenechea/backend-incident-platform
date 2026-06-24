@@ -14,13 +14,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: any) {
-    if (!payload.email) {
-      throw new UnauthorizedException('Payload del token inválido');
-    }
-    return {
-      userId: payload.sub,
-      email: payload.email,
-      role: payload.role,
-    };
+    if (!payload.email) throw new UnauthorizedException('Payload del token inválido');
+    return { userId: payload.sub, email: payload.email, role: payload.role };
   }
 }

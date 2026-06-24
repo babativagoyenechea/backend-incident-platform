@@ -1,4 +1,4 @@
-import { ExceptionFilter, Catch, ArgumentsHost, HttpException, HttpStatus, Logger } from '@nestjs/common';
+import {  ExceptionFilter, Catch, ArgumentsHost, HttpException, HttpStatus, Logger,} from '@nestjs/common';
 
 const HttpStatusCodeName: Record<number, string> = {
   400: 'BAD_REQUEST',
@@ -15,32 +15,29 @@ export class GlobalExceptionFilter implements ExceptionFilter {
   private readonly logger = new Logger('GlobalExceptionFilter');
 
   catch(exception: any, host: ArgumentsHost) {
-    const ctx = host.switchToHttp();
+    const ctx      = host.switchToHttp();
     const response = ctx.getResponse();
-    const request = ctx.getRequest();
+    const request  = ctx.getRequest();
 
-    const status = exception instanceof HttpException 
-      ? exception.getStatus() 
+    const status = exception instanceof HttpException
+      ? exception.getStatus()
       : HttpStatus.INTERNAL_SERVER_ERROR;
 
-    const message = exception instanceof HttpException 
-      ? exception.getResponse() 
+    const message = exception instanceof HttpException
+      ? exception.getResponse()
       : exception.message || 'Internal Server Error';
 
     const traceId = (request as any).traceId || 'N/A';
 
-    // Construye un esquema de respuesta unificado de errores para contratos de API
     const errorResponse = {
       statusCode: status,
-      error: HttpStatusCodeName[status] || 'INTERNAL_SERVER_ERROR',
-      message: typeof message === 'object' ? (message as any).message : message,
+      error:      HttpStatusCodeName[status] || 'INTERNAL_SERVER_ERROR',
+      message:    typeof message === 'object' ? (message as any).message : message,
       traceId,
-      timestamp: new Date().toISOString(),
+      timestamp:  new Date().toISOString(),
     };
 
-    // Auditoría estructurada y trazable usando logs correlacionados con stack trace
     this.logger.error(JSON.stringify({ ...errorResponse, stack: exception.stack }));
-
     response.status(status).json(errorResponse);
   }
 }

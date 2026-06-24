@@ -1,5 +1,5 @@
-import { Controller, Post, Get, Patch, Body, Query, Param, Req, UseGuards, NotFoundException } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiHeader, ApiParam } from '@nestjs/swagger';
+import {  Controller, Post, Get, Patch, Body, Query, Param,  Req, UseGuards, NotFoundException, Inject,} from '@nestjs/common';
+import {  ApiTags, ApiOperation, ApiResponse, ApiBearerAuth,  ApiHeader, ApiParam,} from '@nestjs/swagger';
 import { CreateIncidentUseCase } from '../../application/use-cases/create-incident.use-case';
 import { UpdateIncidentStatusUseCase } from '../../application/use-cases/update-incident-status.use-case';
 import { CreateIncidentDto } from '../../application/dtos/create-incident.dto';
@@ -8,7 +8,6 @@ import { IncidentFiltersDto } from '../../application/dtos/incident-filters.dto'
 import { JwtAuthGuard } from '../../../shared/guards/jwt-auth.guard';
 import { ApiKeyGuard } from '../../../shared/guards/api-key.guard';
 import { IIncidentRepository } from '../../domain/repositories/i-incident.repository';
-import { Inject } from '@nestjs/common';
 
 @ApiTags('Incidents')
 @Controller('incidents')
@@ -26,7 +25,7 @@ export class IncidentController {
   @ApiOperation({ summary: 'Crear un nuevo incidente vinculado a identificadores de traza de eventos' })
   @ApiResponse({ status: 201, description: 'Incidente persistido exitosamente en PostgreSQL' })
   @ApiResponse({ status: 400, description: 'Error de validación en los campos enviados' })
-  @ApiResponse({ status: 401, description: 'No autorizado - Token inválido o no proporcionado' })
+  @ApiResponse({ status: 401, description: 'No autorizado' })
   async create(@Body() dto: CreateIncidentDto, @Req() req: any) {
     const traceId = req.traceId || 'trace-system-generated';
     return this.createUseCase.execute(dto, traceId);
@@ -34,7 +33,7 @@ export class IncidentController {
 
   @Get()
   @UseGuards(ApiKeyGuard)
-  @ApiHeader({ name: 'x-api-key', description: 'Llave de seguridad secreta para la integración' })
+  @ApiHeader({ name: 'x-api-key', description: 'Llave de seguridad para la integración legacy' })
   @ApiOperation({ summary: 'Obtener incidentes paginados con filtros para sistemas externos' })
   @ApiResponse({ status: 200, description: 'Listado de incidentes paginado devuelto exitosamente' })
   @ApiResponse({ status: 401, description: 'API Key inválida o no proporcionada' })
@@ -48,13 +47,10 @@ export class IncidentController {
   @ApiParam({ name: 'id', description: 'UUID del incidente', type: 'string' })
   @ApiOperation({ summary: 'Obtener un incidente completo por su UUID' })
   @ApiResponse({ status: 200, description: 'Incidente encontrado y retornado' })
-  @ApiResponse({ status: 401, description: 'No autorizado - Token JWT inválido o ausente' })
   @ApiResponse({ status: 404, description: 'Incidente no encontrado' })
   async findById(@Param('id') id: string) {
     const incident = await this.repo.findById(id);
-    if (!incident) {
-      throw new NotFoundException(`Incidente con id ${id} no encontrado`);
-    }
+    if (!incident) throw new NotFoundException(`Incidente con id ${id} no encontrado`);
     return incident;
   }
 
@@ -62,17 +58,15 @@ export class IncidentController {
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth('JWT')
   @ApiParam({ name: 'id', description: 'UUID del incidente', type: 'string' })
-  @ApiOperation({ summary: 'Actualizar el estado del ciclo de vida transaccional del incidente' })
+  @ApiOperation({ summary: 'Actualizar el estado del ciclo de vida del incidente' })
   @ApiResponse({ status: 200, description: 'Estado actualizado y auditado atómicamente' })
-  @ApiResponse({ status: 400, description: 'Id de incidente no válido' })
-  @ApiResponse({ status: 401, description: 'No autorizado' })
-  @ApiResponse({ status: 409, description: 'Conflicto - Transición de estado no permitida por el dominio' })
+  @ApiResponse({ status: 409, description: 'Transición de estado no permitida por el dominio' })
   async updateStatus(
     @Param('id') id: string,
     @Body() dto: Omit<UpdateStatusDto, 'id'>,
     @Req() req: any,
   ) {
-    const user = req.user?.email || 'operador.pruebas@coordinadora.com';
+    const user    = req.user?.email || 'operador.pruebas@coordinadora.com';
     const traceId = req.traceId || 'trace-system-generated';
     return this.updateStatusUseCase.execute({ id, status: dto.status }, user, traceId);
   }

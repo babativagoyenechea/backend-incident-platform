@@ -16,7 +16,8 @@ describe('[Integración] RegisterEventUseCase', () => {
     save: jest.fn(),
   };
 
-  const mockAlertQueue = {
+  // stub de la cola — sin BullMQ real
+  const stubQueue = {
     add: jest.fn(),
   };
 
@@ -25,18 +26,17 @@ describe('[Integración] RegisterEventUseCase', () => {
       providers: [
         RegisterEventUseCase,
         { provide: 'IEventRepository', useValue: mockEventRepository },
-        { provide: getQueueToken(ALERT_QUEUE_NAME), useValue: mockAlertQueue },
+        { provide: getQueueToken(ALERT_QUEUE_NAME), useValue: stubQueue },
       ],
     }).compile();
 
     useCase = module.get<RegisterEventUseCase>(RegisterEventUseCase);
     eventRepository = module.get<IEventRepository>('IEventRepository');
     bullQueue = module.get<Queue>(getQueueToken(ALERT_QUEUE_NAME));
-
     jest.clearAllMocks();
   });
 
-  it('debe registrar el evento en MongoDB y agregar a cola BullMQ si es CRITICAL', async () => {
+  it('registra el evento en MongoDB y encola en BullMQ si la severidad es CRITICAL', async () => {
     const dto = {
       application: 'payment-service',
       eventType: 'GATEWAY_TIMEOUT',
@@ -58,12 +58,12 @@ describe('[Integración] RegisterEventUseCase', () => {
     );
 
     mockEventRepository.save.mockResolvedValue(savedEvent);
-    mockAlertQueue.add.mockResolvedValue({ id: 'job-123' });
+    stubQueue.add.mockResolvedValue({ id: 'job-123' });
 
     const result = await useCase.execute(dto, 'trace-test-uuid-1');
 
     expect(result.traceId).toBe('trace-test-uuid-1');
     expect(mockEventRepository.save).toHaveBeenCalledTimes(1);
-    expect(mockAlertQueue.add).toHaveBeenCalledTimes(1);
+    expect(stubQueue.add).toHaveBeenCalledTimes(1);
   });
 });

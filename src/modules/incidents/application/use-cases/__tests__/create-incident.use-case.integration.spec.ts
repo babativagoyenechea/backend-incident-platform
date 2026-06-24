@@ -1,24 +1,10 @@
 /// <reference types="jest" />
-/**
- * PRUEBA DE INTEGRACIÓN — CreateIncidentUseCase
- *
- * Valida la orquestación completa del caso de uso:
- * 1. Construcción de la entidad de dominio Incident
- * 2. Persistencia atómica con auditoría (saveWithAudit)
- * 3. Invalidación de caché Redis y broadcast de métricas
- *
- * Estrategia: mocks manuales de IIncidentRepository, Redis y EventsGateway
- * para aislar la lógica de negocio sin levantar infraestructura real.
- */
-
 import { Test, TestingModule } from '@nestjs/testing';
 import { CreateIncidentUseCase } from '../create-incident.use-case';
 import { MetricsBroadcastService } from '../../../../shared/application/services/metrics-broadcast.service';
 import { Incident } from '../../../domain/entities/incident.entity';
 import { IncidentAudit } from '../../../domain/entities/incident-audit.entity';
 import { CreateIncidentDto } from '../../dtos/create-incident.dto';
-
-// ── Fábricas de mocks ─────────────────────────────────────────────────────────
 
 const buildIncidentMock = (overrides: Partial<Incident> = {}): Incident =>
   new Incident(
@@ -28,13 +14,13 @@ const buildIncidentMock = (overrides: Partial<Incident> = {}): Incident =>
     overrides.affectedApp ?? 'payment-service',
     overrides.severity ?? 'CRITICAL',
     overrides.status ?? 'OPEN',
-    overrides.assignee ?? 'ops-team@coordinadora.com',
+    overrides.assignee ?? 'ops-team@empresa.com',
     overrides.relatedEventTraceIds ?? ['trace-evt-001'],
-    overrides.createdAt ?? new Date('2026-01-15T10:00:00Z'),
-    overrides.updatedAt ?? new Date('2026-01-15T10:00:00Z'),
+    overrides.createdAt ?? new Date('2024-03-10T10:00:00Z'),
+    overrides.updatedAt ?? new Date('2024-03-10T10:00:00Z'),
   );
 
-const mockIncidentRepository = {
+const fakeRepo = {
   saveWithAudit: jest.fn(),
   findById: jest.fn(),
   findByFilters: jest.fn(),
@@ -45,8 +31,6 @@ const mockMetricsBroadcast = {
   invalidateAndBroadcast: jest.fn(),
 };
 
-// ── Suite principal ────────────────────────────────────────────────────────────
-
 describe('[Integración] CreateIncidentUseCase', () => {
   let useCase: CreateIncidentUseCase;
 
@@ -54,17 +38,14 @@ describe('[Integración] CreateIncidentUseCase', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         CreateIncidentUseCase,
-        { provide: 'IIncidentRepository', useValue: mockIncidentRepository },
+        { provide: 'IIncidentRepository', useValue: fakeRepo },
         { provide: MetricsBroadcastService, useValue: mockMetricsBroadcast },
       ],
     }).compile();
 
     useCase = module.get<CreateIncidentUseCase>(CreateIncidentUseCase);
-
     jest.clearAllMocks();
   });
-
-  // ── HU2: Creación exitosa ──────────────────────────────────────────────────
 
   describe('execute() — flujo exitoso', () => {
     it('debe persistir el incidente con estado OPEN y devolver la entidad guardada', async () => {
@@ -73,17 +54,17 @@ describe('[Integración] CreateIncidentUseCase', () => {
         description: 'El gateway no responde tras 5 reintentos',
         affectedApplication: 'payment-service',
         severity: 'CRITICAL',
-        assignee: 'ops-team@coordinadora.com',
+        assignee: 'ops-team@empresa.com',
         relatedEventTraceIds: ['trace-evt-001', 'trace-evt-002'],
       };
       const expectedIncident = buildIncidentMock();
-      mockIncidentRepository.saveWithAudit.mockResolvedValue(expectedIncident);
+      fakeRepo.saveWithAudit.mockResolvedValue(expectedIncident);
       mockMetricsBroadcast.invalidateAndBroadcast.mockResolvedValue(undefined);
 
       const result = await useCase.execute(dto, 'trace-test-001');
 
       expect(result).toBe(expectedIncident);
-      expect(mockIncidentRepository.saveWithAudit).toHaveBeenCalledTimes(1);
+      expect(fakeRepo.saveWithAudit).toHaveBeenCalledTimes(1);
     });
 
     it('debe construir la entidad Incident con estado inicial OPEN sin importar el DTO', async () => {
@@ -92,15 +73,14 @@ describe('[Integración] CreateIncidentUseCase', () => {
         affectedApplication: 'shipping-service',
         severity: 'HIGH',
       };
-      const capturedIncident = buildIncidentMock({ status: 'OPEN' });
-      mockIncidentRepository.saveWithAudit.mockImplementation(
+      fakeRepo.saveWithAudit.mockImplementation(
         (incident: Incident) => Promise.resolve(incident),
       );
       mockMetricsBroadcast.invalidateAndBroadcast.mockResolvedValue(undefined);
 
       await useCase.execute(dto, 'trace-test-002');
 
-      const [incidentArg] = mockIncidentRepository.saveWithAudit.mock.calls[0] as [Incident, IncidentAudit];
+      const [incidentArg] = fakeRepo.saveWithAudit.mock.calls[0] as [Incident, IncidentAudit];
       expect(incidentArg.status).toBe('OPEN');
       expect(incidentArg.title).toBe('Timeout en servicio de envíos');
       expect(incidentArg.affectedApp).toBe('shipping-service');
@@ -113,14 +93,14 @@ describe('[Integración] CreateIncidentUseCase', () => {
         affectedApplication: 'auth-service',
         severity: 'LOW',
       };
-      mockIncidentRepository.saveWithAudit.mockImplementation(
+      fakeRepo.saveWithAudit.mockImplementation(
         (incident: Incident) => Promise.resolve(incident),
       );
       mockMetricsBroadcast.invalidateAndBroadcast.mockResolvedValue(undefined);
 
       await useCase.execute(dto, 'trace-no-assignee');
 
-      const [incidentArg] = mockIncidentRepository.saveWithAudit.mock.calls[0] as [Incident, IncidentAudit];
+      const [incidentArg] = fakeRepo.saveWithAudit.mock.calls[0] as [Incident, IncidentAudit];
       expect(incidentArg.assignee).toBe('UNASSIGNED');
     });
 
@@ -130,14 +110,14 @@ describe('[Integración] CreateIncidentUseCase', () => {
         affectedApplication: 'inventory-service',
         severity: 'MEDIUM',
       };
-      mockIncidentRepository.saveWithAudit.mockImplementation(
+      fakeRepo.saveWithAudit.mockImplementation(
         (incident: Incident) => Promise.resolve(incident),
       );
       mockMetricsBroadcast.invalidateAndBroadcast.mockResolvedValue(undefined);
 
       await useCase.execute(dto, 'trace-audit-test');
 
-      const [, auditArg] = mockIncidentRepository.saveWithAudit.mock.calls[0] as [Incident, IncidentAudit];
+      const [, auditArg] = fakeRepo.saveWithAudit.mock.calls[0] as [Incident, IncidentAudit];
       expect(auditArg.oldStatus).toBe('OPEN');
       expect(auditArg.newStatus).toBe('OPEN');
       expect(auditArg.changedBy).toBe('SYSTEM');
@@ -152,14 +132,14 @@ describe('[Integración] CreateIncidentUseCase', () => {
         severity: 'CRITICAL',
         relatedEventTraceIds: traceIds,
       };
-      mockIncidentRepository.saveWithAudit.mockImplementation(
+      fakeRepo.saveWithAudit.mockImplementation(
         (incident: Incident) => Promise.resolve(incident),
       );
       mockMetricsBroadcast.invalidateAndBroadcast.mockResolvedValue(undefined);
 
       await useCase.execute(dto, 'trace-multi-evt');
 
-      const [incidentArg] = mockIncidentRepository.saveWithAudit.mock.calls[0] as [Incident, IncidentAudit];
+      const [incidentArg] = fakeRepo.saveWithAudit.mock.calls[0] as [Incident, IncidentAudit];
       expect(incidentArg.relatedEventTraceIds).toEqual(traceIds);
     });
 
@@ -169,19 +149,17 @@ describe('[Integración] CreateIncidentUseCase', () => {
         affectedApplication: 'batch-service',
         severity: 'LOW',
       };
-      mockIncidentRepository.saveWithAudit.mockImplementation(
+      fakeRepo.saveWithAudit.mockImplementation(
         (incident: Incident) => Promise.resolve(incident),
       );
       mockMetricsBroadcast.invalidateAndBroadcast.mockResolvedValue(undefined);
 
       await useCase.execute(dto, 'trace-no-events');
 
-      const [incidentArg] = mockIncidentRepository.saveWithAudit.mock.calls[0] as [Incident, IncidentAudit];
+      const [incidentArg] = fakeRepo.saveWithAudit.mock.calls[0] as [Incident, IncidentAudit];
       expect(incidentArg.relatedEventTraceIds).toEqual([]);
     });
   });
-
-  // ── HU4: Invalidación de caché tras creación ───────────────────────────────
 
   describe('execute() — invalidación de caché y broadcast', () => {
     it('debe invocar invalidateAndBroadcast después de persistir el incidente', async () => {
@@ -190,8 +168,7 @@ describe('[Integración] CreateIncidentUseCase', () => {
         affectedApplication: 'cache-service',
         severity: 'HIGH',
       };
-      const savedIncident = buildIncidentMock();
-      mockIncidentRepository.saveWithAudit.mockResolvedValue(savedIncident);
+      fakeRepo.saveWithAudit.mockResolvedValue(buildIncidentMock());
       mockMetricsBroadcast.invalidateAndBroadcast.mockResolvedValue(undefined);
 
       await useCase.execute(dto, 'trace-cache-001');
@@ -205,7 +182,7 @@ describe('[Integración] CreateIncidentUseCase', () => {
         affectedApplication: 'minimal-service',
         severity: 'LOW',
       };
-      mockIncidentRepository.saveWithAudit.mockResolvedValue(buildIncidentMock({ severity: 'LOW' }));
+      fakeRepo.saveWithAudit.mockResolvedValue(buildIncidentMock({ severity: 'LOW' }));
       mockMetricsBroadcast.invalidateAndBroadcast.mockResolvedValue(undefined);
 
       await useCase.execute(dto, 'trace-minimal');
@@ -214,16 +191,14 @@ describe('[Integración] CreateIncidentUseCase', () => {
     });
   });
 
-  // ── Manejo de errores ──────────────────────────────────────────────────────
-
   describe('execute() — manejo de fallos de infraestructura', () => {
     it('debe propagar el error si saveWithAudit falla y no invocar el broadcast', async () => {
       const dto: CreateIncidentDto = {
-        title: 'Incidente con fallo de DB',
+        title: 'Incidente con fallo de BD',
         affectedApplication: 'db-service',
         severity: 'CRITICAL',
       };
-      mockIncidentRepository.saveWithAudit.mockRejectedValue(
+      fakeRepo.saveWithAudit.mockRejectedValue(
         new Error('Connection to PostgreSQL lost'),
       );
 
@@ -239,7 +214,7 @@ describe('[Integración] CreateIncidentUseCase', () => {
         affectedApplication: 'redis-service',
         severity: 'MEDIUM',
       };
-      mockIncidentRepository.saveWithAudit.mockResolvedValue(buildIncidentMock());
+      fakeRepo.saveWithAudit.mockResolvedValue(buildIncidentMock());
       mockMetricsBroadcast.invalidateAndBroadcast.mockRejectedValue(
         new Error('Redis connection refused'),
       );

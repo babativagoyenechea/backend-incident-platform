@@ -20,7 +20,7 @@ import { AuthModule } from '../shared/auth.module';
     CreateIncidentUseCase,
     UpdateIncidentStatusUseCase,
     {
-      provide: 'IIncidentRepository',
+      provide:  'IIncidentRepository',
       useClass: TypeOrmIncidentRepository,
     },
   ],

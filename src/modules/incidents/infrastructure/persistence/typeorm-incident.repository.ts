@@ -21,36 +21,32 @@ export class TypeOrmIncidentRepository implements IIncidentRepository {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     await queryRunner.startTransaction();
-
     try {
-      // 1. Mapear de Dominio a ORM Entity
       const ormEntity = new IncidentOrmEntity();
       if (incident.id) ormEntity.id = incident.id;
-      ormEntity.title = incident.title;
-      ormEntity.description = incident.description;
-      ormEntity.affectedApp = incident.affectedApp;
-      ormEntity.severity = incident.severity;
-      ormEntity.status = incident.status;
-      ormEntity.assignee = incident.assignee;
+      ormEntity.title                = incident.title;
+      ormEntity.description          = incident.description;
+      ormEntity.affectedApp          = incident.affectedApp;
+      ormEntity.severity             = incident.severity;
+      ormEntity.status               = incident.status;
+      ormEntity.assignee             = incident.assignee;
       ormEntity.relatedEventTraceIds = incident.relatedEventTraceIds;
 
-      const savedEntity = await queryRunner.manager.save(IncidentOrmEntity, ormEntity);
+      const saved = await queryRunner.manager.save(IncidentOrmEntity, ormEntity);
 
-      // 2. Mapear y registrar auditoría inmutable vinculada
-      const ormAudit = new IncidentAuditOrmEntity();
-      ormAudit.incidentId = savedEntity.id;
-      ormAudit.oldStatus = audit.oldStatus;
-      ormAudit.newStatus = audit.newStatus;
-      ormAudit.changedBy = audit.changedBy;
-      ormAudit.traceId = audit.traceId;
+      const ormAudit       = new IncidentAuditOrmEntity();
+      ormAudit.incidentId  = saved.id;
+      ormAudit.oldStatus   = audit.oldStatus;
+      ormAudit.newStatus   = audit.newStatus;
+      ormAudit.changedBy   = audit.changedBy;
+      ormAudit.traceId     = audit.traceId;
 
       await queryRunner.manager.save(IncidentAuditOrmEntity, ormAudit);
-
       await queryRunner.commitTransaction();
-      return this.toDomain(savedEntity);
-    } catch (error) {
+      return this.toDomain(saved);
+    } catch (err) {
       await queryRunner.rollbackTransaction();
-      throw error;
+      throw err;
     } finally {
       await queryRunner.release();
     }
@@ -62,27 +58,22 @@ export class TypeOrmIncidentRepository implements IIncidentRepository {
   }
 
   async findByFilters(filters: any): Promise<any> {
-    const page = Math.max(Number(filters.page ?? 1), 1);
+    const page  = Math.max(Number(filters.page  ?? 1), 1);
     const limit = Math.min(Number(filters.limit ?? 20), 100);
-
     const qb = this.repo.createQueryBuilder('incident');
 
-    if (filters.status) {
+    if (filters.status)
       qb.andWhere('incident.status = :status', { status: filters.status });
-    }
-    if (filters.severity) {
+    if (filters.severity)
       qb.andWhere('incident.severity = :severity', { severity: filters.severity });
-    }
-    if (filters.application) {
+    if (filters.application) 
       qb.andWhere('incident.affectedApp = :application', { application: filters.application });
-    }
 
     qb.orderBy('incident.createdAt', 'DESC')
       .skip((page - 1) * limit)
       .take(limit);
 
     const [data, total] = await qb.getManyAndCount();
-
     return {
       data: data.map((e) => this.toDomain(e)),
       total,
