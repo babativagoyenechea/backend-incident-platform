@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import {  Entity, PrimaryGeneratedColumn, Column,  CreateDateColumn, UpdateDateColumn,} from 'typeorm';
 
 @Entity('incidents')
 export class IncidentOrmEntity {
@@ -23,7 +23,7 @@ export class IncidentOrmEntity {
   @Column({ nullable: true, length: 150 })
   assignee!: string;
 
-  // CORRECCIÓN #1: Array nativo de PostgreSQL (TEXT[]) en lugar de simple-string
+  // TEXT[] nativo de Postgres para conservar el tipado y evitar bugs
   @Column({ name: 'related_event_trace_ids', type: 'text', array: true, nullable: true })
   relatedEventTraceIds!: string[];
 

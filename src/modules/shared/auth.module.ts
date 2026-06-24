@@ -9,16 +9,16 @@ import { AuthController } from './presentation/auth.controller';
   imports: [
     PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.registerAsync({
-      imports: [ConfigModule],
+      imports:    [ConfigModule],
       useFactory: (config: ConfigService) => ({
-        secret: config.get<string>('JWT_SECRET'),
+        secret:      config.get<string>('JWT_SECRET'),
         signOptions: { expiresIn: '8h' },
       }),
       inject: [ConfigService],
     }),
   ],
   controllers: [AuthController],
-  providers: [JwtStrategy],
-  exports: [PassportModule, JwtModule],
+  providers:   [JwtStrategy],
+  exports:     [PassportModule, JwtModule],
 })
 export class AuthModule {}

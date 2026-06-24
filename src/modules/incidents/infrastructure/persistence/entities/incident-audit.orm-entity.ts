@@ -8,18 +8,10 @@ export class IncidentAuditOrmEntity {
   @Column({ name: 'incident_id', type: 'uuid' })
   incidentId!: string;
 
-  @Column({
-    name: 'old_status',
-    type: 'enum',
-    enum: ['OPEN', 'IN_PROGRESS', 'RESOLVED'],
-  })
+  @Column({ name: 'old_status', type: 'enum', enum: ['OPEN', 'IN_PROGRESS', 'RESOLVED'] })
   oldStatus!: string;
 
-  @Column({
-    name: 'new_status',
-    type: 'enum',
-    enum: ['OPEN', 'IN_PROGRESS', 'RESOLVED'],
-  })
+  @Column({ name: 'new_status', type: 'enum', enum: ['OPEN', 'IN_PROGRESS', 'RESOLVED'] })
   newStatus!: string;
 
   @Column({ name: 'changed_by', length: 150, nullable: true })

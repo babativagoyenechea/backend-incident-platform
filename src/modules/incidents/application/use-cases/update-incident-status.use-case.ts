@@ -1,4 +1,4 @@
-import { Injectable, Inject, NotFoundException, ConflictException, Logger } from '@nestjs/common';
+import {  Injectable, Inject, NotFoundException, ConflictException, Logger,} from '@nestjs/common';
 import { UpdateStatusDto } from '../dtos/update-status.dto';
 import { Incident } from '../../domain/entities/incident.entity';
 import { IncidentAudit } from '../../domain/entities/incident-audit.entity';
@@ -23,29 +23,31 @@ export class UpdateIncidentStatusUseCase {
     if (!incident) throw new NotFoundException(`Incidente ${dto.id} no encontrado`);
 
     const current = new IncidentStatus(incident.status);
-    const next = new IncidentStatus(dto.status);
+    const next    = new IncidentStatus(dto.status);
 
     if (!current.canTransitionTo(next)) {
-      throw new ConflictException(`La transición de ${current.getValue()} a ${next.getValue()} no está permitida`);
+      throw new ConflictException(
+        `La transición de ${current.getValue()} a ${next.getValue()} no está permitida`,
+      );
     }
 
-    const oldStatus = incident.status;
-    incident.status = next.getValue();
+    const oldStatus    = incident.status;
+    incident.status    = next.getValue();
     incident.updatedAt = new Date();
 
-    const audit = new IncidentAudit(incident.id, oldStatus, next.getValue(), requestingUser, traceId);
+    const audit   = new IncidentAudit(incident.id, oldStatus, next.getValue(), requestingUser, traceId);
     const updated = await this.repo.saveWithAudit(incident, audit);
 
     await this.metricsBroadcast.invalidateAndBroadcast();
     this.gateway.emitIncidentUpdated(updated);
 
     this.logger.log(JSON.stringify({
-      action: 'INCIDENT_STATUS_UPDATED',
+      action:     'INCIDENT_STATUS_UPDATED',
       traceId,
       incidentId: incident.id,
       oldStatus,
-      newStatus: next.getValue(),
-      changedBy: requestingUser,
+      newStatus:  next.getValue(),
+      changedBy:  requestingUser,
     }));
 
     return updated;

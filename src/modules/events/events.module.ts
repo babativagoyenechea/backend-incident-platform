@@ -16,7 +16,7 @@ import { MongoEventRepository } from './infrastructure/persistence/mongo-event.r
         connection: {
           host: config.get<string>('REDIS_HOST'),
           port: config.get<number>('REDIS_PORT'),
-          db: config.get<number>('REDIS_QUEUE_DB', 1),
+          db:   config.get<number>('REDIS_QUEUE_DB', 1),
         },
       }),
       inject: [ConfigService],
@@ -26,7 +26,7 @@ import { MongoEventRepository } from './infrastructure/persistence/mongo-event.r
   providers: [
     RegisterEventUseCase,
     {
-      provide: 'IEventRepository',
+      provide:  'IEventRepository',
       useClass: MongoEventRepository,
     },
   ],

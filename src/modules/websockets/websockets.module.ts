@@ -4,6 +4,6 @@ import { EventsGateway } from './events.gateway';
 @Global()
 @Module({
   providers: [EventsGateway],
-  exports: [EventsGateway],
+  exports:   [EventsGateway],
 })
 export class WebsocketsModule {}

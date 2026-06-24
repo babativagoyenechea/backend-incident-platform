@@ -17,7 +17,7 @@ export class AlertDocument extends Document {
 
   @Prop({
     required: true,
-    enum: ['PENDING', 'PROCESSED', 'FAILED'],
+    enum:    ['PENDING', 'PROCESSED', 'FAILED'],
     default: 'PENDING',
   })
   processingStatus!: string;

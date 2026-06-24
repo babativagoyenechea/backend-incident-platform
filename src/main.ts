@@ -16,7 +16,7 @@ async function bootstrap() {
   });
   app.setGlobalPrefix('api');
 
-  // whitelist strict: evitar que lleguen campos extra a los casos de uso
+  // Rechazar campos que no estén declarados en los DTOs
   app.useGlobalPipes(new ValidationPipe({
     whitelist: true,
     forbidNonWhitelisted: true,

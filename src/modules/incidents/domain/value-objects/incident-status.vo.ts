@@ -1,13 +1,15 @@
 export class IncidentStatus {
+  // Mapa de transiciones válidas. RESOLVED no tiene salidas: un incidente
+  // resuelto queda congelado y no puede revertirse desde aquí.
   private static readonly VALID_TRANSITIONS: Record<string, string[]> = {
-    OPEN: ['IN_PROGRESS'],
+    OPEN:        ['IN_PROGRESS'],
     IN_PROGRESS: ['RESOLVED', 'OPEN'],
-    RESOLVED: [],
+    RESOLVED:    [],
   };
 
   constructor(private readonly value: string) {
-    const validStatuses = Object.keys(IncidentStatus.VALID_TRANSITIONS);
-    if (!validStatuses.includes(value)) {
+    const valid = Object.keys(IncidentStatus.VALID_TRANSITIONS);
+    if (!valid.includes(value)) {
       throw new Error(`Estado de incidente inválido: ${value}`);
     }
   }

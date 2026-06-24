@@ -10,7 +10,6 @@ import { DashboardModule } from '../dashboard/dashboard.module';
 import { RedisModule } from '../shared/infrastructure/redis/redis.module';
 import { MetricsBroadcastService } from '../shared/application/services/metrics-broadcast.service';
 
-
 @Module({
   imports: [
     MongooseModule.forFeature([{ name: AlertDocument.name, schema: AlertSchema }]),
@@ -26,7 +25,7 @@ import { MetricsBroadcastService } from '../shared/application/services/metrics-
     AlertWorker,
     MetricsBroadcastService,
     {
-      provide: 'IAlertRepository',
+      provide:  'IAlertRepository',
       useClass: MongoAlertRepository,
     },
   ],

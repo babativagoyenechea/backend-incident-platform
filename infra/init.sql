@@ -1,9 +1,9 @@
--- Los tipos enumerados refuerzan en la base de datos las mismas restricciones
--- que viven en el dominio, evitando estados inválidos si se escribe fuera de la API.
+-- Los tipos enumerados replican en la base de datos las mismas restricciones
+-- del dominio, así un INSERT directo no puede meter un estado inválido.
 CREATE TYPE incident_status AS ENUM ('OPEN', 'IN_PROGRESS', 'RESOLVED');
 CREATE TYPE severity_level  AS ENUM ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL');
 
--- Tabla principal de incidentes (HU2)
+-- Tabla principal de incidentes
 CREATE TABLE incidents (
   id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   title                   VARCHAR(255) NOT NULL,
@@ -12,22 +12,17 @@ CREATE TABLE incidents (
   severity                severity_level NOT NULL,
   status                  incident_status NOT NULL DEFAULT 'OPEN',
   assignee                VARCHAR(150),
-  -- Almacena los traceIds de eventos relacionados como array nativo de Postgres.
-  -- Mantiene un acoplamiento débil con los documentos de MongoDB.
   related_event_trace_ids TEXT[],
   created_at              TIMESTAMP DEFAULT NOW(),
   updated_at              TIMESTAMP DEFAULT NOW()
 );
 
--- Índices para las consultas de filtrado del Dashboard (HU4)
 CREATE INDEX idx_incidents_status   ON incidents(status);
 CREATE INDEX idx_incidents_severity ON incidents(severity);
 CREATE INDEX idx_incidents_app      ON incidents(affected_app);
 CREATE INDEX idx_incidents_created  ON incidents(created_at DESC);
 
--- Auditoría inmutable: un registro por cada cambio de estado (append-only).
--- Se omite el CASCADE de forma intencional para preservar el rastro histórico
--- incluso si el incidente fuera eliminado.
+-- Tabla de auditoría append-only. La FK no tiene CASCADE intencional.
 CREATE TABLE incident_audit (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   incident_id  UUID NOT NULL REFERENCES incidents(id),

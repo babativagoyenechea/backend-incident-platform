@@ -10,7 +10,7 @@ export class EventsGateway implements OnGatewayInit {
   server!: Server;
 
   afterInit() {
-    this.logger.log('Gateway WebSocket inicializado con éxito');
+    this.logger.log('Gateway WebSocket inicializado');
   }
 
   emitAlertCreated(alert: any) {

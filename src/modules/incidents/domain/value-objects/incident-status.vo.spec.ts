@@ -15,13 +15,13 @@ describe('IncidentStatus (Value Object)', () => {
   describe('canTransitionTo()', () => {
     it('permite la transición de OPEN a IN_PROGRESS', () => {
       const current = new IncidentStatus('OPEN');
-      const next = new IncidentStatus('IN_PROGRESS');
+      const next    = new IncidentStatus('IN_PROGRESS');
       expect(current.canTransitionTo(next)).toBe(true);
     });
 
     it('prohíbe saltar de OPEN a RESOLVED directamente', () => {
       const current = new IncidentStatus('OPEN');
-      const next = new IncidentStatus('RESOLVED');
+      const next    = new IncidentStatus('RESOLVED');
       expect(current.canTransitionTo(next)).toBe(false);
     });
 
