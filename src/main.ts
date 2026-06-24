@@ -8,28 +8,24 @@ import { GlobalExceptionFilter } from './modules/shared/filters/global-exception
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
-
-  // Seguridad y políticas CORS obligatorias para el frontend
   app.use(helmet());
   app.enableCors({
     origin: ['http://localhost:5173'],
     methods: ['GET', 'POST', 'PATCH'],
     credentials: true,
   });
-  
   app.setGlobalPrefix('api');
 
-  // Pipes de validación estricta (Evita mutaciones silenciosas en DTOs)
+  // whitelist strict: evitar que lleguen campos extra a los casos de uso
   app.useGlobalPipes(new ValidationPipe({
     whitelist: true,
     forbidNonWhitelisted: true,
     transform: true,
   }));
-  
+
   app.useGlobalInterceptors(new TraceIdInterceptor());
   app.useGlobalFilters(new GlobalExceptionFilter());
 
-  // Configuración de OpenAPI / Swagger según requerimientos del reto
   const config = new DocumentBuilder()
     .setTitle('Plataforma de Gestión de Incidentes y Monitoreo Operacional')
     .setDescription(
@@ -48,7 +44,7 @@ async function bootstrap() {
     .addTag('Incidents', 'Gestión del ciclo de vida de incidentes con auditoría transaccional')
     .addTag('Dashboard', 'Métricas consolidadas con Cache Aside Pattern')
     .addTag('Health', 'Verificación del estado de las dependencias del sistema')
-    .addTag('Auth', 'Autenticación y generación de credenciales de acceso para operadores') 
+    .addTag('Auth', 'Autenticación y generación de credenciales de acceso para operadores')
     .build();
 
   const document = SwaggerModule.createDocument(app, config);
@@ -56,10 +52,9 @@ async function bootstrap() {
     swaggerOptions: { persistAuthorization: true },
   });
 
-  app.enableShutdownHooks(); 
-
+  app.enableShutdownHooks();
   const port = process.env.PORT || 3000;
   await app.listen(port);
-  console.log(`Backend operativo corriendo en el puerto: ${port}`);
+  console.log(`Backend corriendo en el puerto: ${port}`);
 }
 bootstrap();

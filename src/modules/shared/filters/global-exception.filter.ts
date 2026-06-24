@@ -19,17 +19,16 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     const response = ctx.getResponse();
     const request = ctx.getRequest();
 
-    const status = exception instanceof HttpException 
-      ? exception.getStatus() 
+    const status = exception instanceof HttpException
+      ? exception.getStatus()
       : HttpStatus.INTERNAL_SERVER_ERROR;
 
-    const message = exception instanceof HttpException 
-      ? exception.getResponse() 
+    const message = exception instanceof HttpException
+      ? exception.getResponse()
       : exception.message || 'Internal Server Error';
 
     const traceId = (request as any).traceId || 'N/A';
 
-    // Construye un esquema de respuesta unificado de errores para contratos de API
     const errorResponse = {
       statusCode: status,
       error: HttpStatusCodeName[status] || 'INTERNAL_SERVER_ERROR',
@@ -38,9 +37,7 @@ export class GlobalExceptionFilter implements ExceptionFilter {
       timestamp: new Date().toISOString(),
     };
 
-    // Auditoría estructurada y trazable usando logs correlacionados con stack trace
     this.logger.error(JSON.stringify({ ...errorResponse, stack: exception.stack }));
-
     response.status(status).json(errorResponse);
   }
 }

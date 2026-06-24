@@ -1,7 +1,8 @@
 import { Injectable, Inject, NotFoundException, ConflictException, Logger } from '@nestjs/common';
 import { UpdateStatusDto } from '../dtos/update-status.dto';
 import { Incident } from '../../domain/entities/incident.entity';
-import { IncidentAudit } from '../../domain/entities/incident-audit.entity';import { IIncidentRepository } from '../../domain/repositories/i-incident.repository';
+import { IncidentAudit } from '../../domain/entities/incident-audit.entity';
+import { IIncidentRepository } from '../../domain/repositories/i-incident.repository';
 import { IncidentStatus } from '../../domain/value-objects/incident-status.vo';
 import { MetricsBroadcastService } from '../../../shared/application/services/metrics-broadcast.service';
 import { EventsGateway } from '../../../websockets/events.gateway';
@@ -24,7 +25,6 @@ export class UpdateIncidentStatusUseCase {
     const current = new IncidentStatus(incident.status);
     const next = new IncidentStatus(dto.status);
 
-    // 1. Validar la regla de negocio pura de transiciones permitidas
     if (!current.canTransitionTo(next)) {
       throw new ConflictException(`La transición de ${current.getValue()} a ${next.getValue()} no está permitida`);
     }
@@ -34,11 +34,8 @@ export class UpdateIncidentStatusUseCase {
     incident.updatedAt = new Date();
 
     const audit = new IncidentAudit(incident.id, oldStatus, next.getValue(), requestingUser, traceId);
-    
-    // 2. Guardar en una única transacción ACID
     const updated = await this.repo.saveWithAudit(incident, audit);
 
-    // CORRECCIÓN #7: Invalidación activa de caché y emisión en tiempo real
     await this.metricsBroadcast.invalidateAndBroadcast();
     this.gateway.emitIncidentUpdated(updated);
 
@@ -48,7 +45,7 @@ export class UpdateIncidentStatusUseCase {
       incidentId: incident.id,
       oldStatus,
       newStatus: next.getValue(),
-      changedBy: requestingUser
+      changedBy: requestingUser,
     }));
 
     return updated;

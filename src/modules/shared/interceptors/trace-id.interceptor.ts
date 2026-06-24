@@ -9,9 +9,7 @@ export class TraceIdInterceptor implements NestInterceptor {
     const request = ctx.getRequest();
     const response = ctx.getResponse();
 
-    // Reutiliza el traceId enviado por el cliente en las cabeceras, o genera uno nuevo si no existe
     const traceId = request.headers['x-trace-id'] || uuidv4();
-
     request.traceId = traceId;
     response.setHeader('x-trace-id', traceId);
 

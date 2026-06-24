@@ -23,7 +23,6 @@ export class TypeOrmIncidentRepository implements IIncidentRepository {
     await queryRunner.startTransaction();
 
     try {
-      // 1. Mapear de Dominio a ORM Entity
       const ormEntity = new IncidentOrmEntity();
       if (incident.id) ormEntity.id = incident.id;
       ormEntity.title = incident.title;
@@ -34,23 +33,22 @@ export class TypeOrmIncidentRepository implements IIncidentRepository {
       ormEntity.assignee = incident.assignee;
       ormEntity.relatedEventTraceIds = incident.relatedEventTraceIds;
 
-      const savedEntity = await queryRunner.manager.save(IncidentOrmEntity, ormEntity);
+      const saved = await queryRunner.manager.save(IncidentOrmEntity, ormEntity);
 
-      // 2. Mapear y registrar auditoría inmutable vinculada
       const ormAudit = new IncidentAuditOrmEntity();
-      ormAudit.incidentId = savedEntity.id;
+      ormAudit.incidentId = saved.id;
       ormAudit.oldStatus = audit.oldStatus;
       ormAudit.newStatus = audit.newStatus;
       ormAudit.changedBy = audit.changedBy;
       ormAudit.traceId = audit.traceId;
 
       await queryRunner.manager.save(IncidentAuditOrmEntity, ormAudit);
-
       await queryRunner.commitTransaction();
-      return this.toDomain(savedEntity);
-    } catch (error) {
+
+      return this.toDomain(saved);
+    } catch (err) {
       await queryRunner.rollbackTransaction();
-      throw error;
+      throw err;
     } finally {
       await queryRunner.release();
     }

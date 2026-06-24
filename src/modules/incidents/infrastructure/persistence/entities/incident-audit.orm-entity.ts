@@ -11,14 +11,14 @@ export class IncidentAuditOrmEntity {
   @Column({
     name: 'old_status',
     type: 'enum',
-    enum: ['OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'],
+    enum: ['OPEN', 'IN_PROGRESS', 'RESOLVED'],
   })
   oldStatus!: string;
 
   @Column({
     name: 'new_status',
     type: 'enum',
-    enum: ['OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'],
+    enum: ['OPEN', 'IN_PROGRESS', 'RESOLVED'],
   })
   newStatus!: string;
 

@@ -22,14 +22,9 @@ export class AlertWorker extends WorkerHost {
 
   async process(job: Job<AlertJobPayload>): Promise<void> {
     const { traceId, severity, application } = job.data;
-
     try {
       this.logger.log(
-        JSON.stringify({
-          action: 'ALERT_PROCESSING_STARTED',
-          traceId,
-          jobId: job.id,
-        }),
+        JSON.stringify({ action: 'ALERT_PROCESSING_STARTED', traceId, jobId: job.id }),
       );
 
       const alert = await this.createAlert.execute({
@@ -42,11 +37,7 @@ export class AlertWorker extends WorkerHost {
       await this.metricsBroadcast.invalidateAndBroadcast();
 
       this.logger.log(
-        JSON.stringify({
-          action: 'ALERT_PROCESSING_COMPLETED',
-          traceId,
-          alertId: alert.id,
-        }),
+        JSON.stringify({ action: 'ALERT_PROCESSING_COMPLETED', alertId: alert.id, traceId }),
       );
     } catch (error: any) {
       this.logger.error(
@@ -59,11 +50,8 @@ export class AlertWorker extends WorkerHost {
       );
 
       if (job.attemptsMade >= (job.opts.attempts ?? 3) - 1) {
-        await this.dlq.add('failed-alert', job.data, {
-          removeOnComplete: false,
-        });
+        await this.dlq.add('failed-alert', job.data, { removeOnComplete: false });
       }
-
       throw error;
     }
   }
